@@ -57,10 +57,10 @@ const ErrorKind = enum {
     internal,
 };
 
-const ErrorGroup = struct { kind: ErrorKind, codes: []ExitCode };
+const ErrorGroup = struct { kind: ErrorKind, codes: []const ExitCode };
 
 const error_table = [_]ErrorGroup{
-    .{ .kind = .corrupt_archive, .codes = &.{ ExitCode.multidisk, ExitCode.nozip, ExitCode.incons, ExitCode.compressed_data } },
+    .{ .kind = .corrupt_archive, .codes = &.{ ExitCode.multidisk, ExitCode.nozip, ExitCode.incons, ExitCode.compressed_data, ExitCode.truncated_zip } },
     .{ .kind = .io, .codes = &.{ ExitCode.eof, ExitCode.rename, ExitCode.close, ExitCode.seek, ExitCode.open, ExitCode.tmpopen, ExitCode.remove, ExitCode.tell } },
     .{ .kind = .read, .codes = &.{ExitCode.read} },
     .{ .kind = .write, .codes = &.{ExitCode.write} },
@@ -70,8 +70,33 @@ const error_table = [_]ErrorGroup{
     .{ .kind = .not_found, .codes = &.{ExitCode.noent} },
     .{ .kind = .already_exists, .codes = &.{ExitCode.exists} },
     .{ .kind = .invalid_argument, .codes = &.{ExitCode.inval} },
-    .{ .kind = .permission, .codes = &.{ExitCode.rdonly} },
+    .{ .kind = .permission, .codes = &.{ ExitCode.rdonly, ExitCode.not_allowed } },
     .{ .kind = .password, .codes = &.{ ExitCode.nopasswd, ExitCode.wrongpasswd } },
-    .{ .kind = .entry, .codes = &.{ ExitCode.zipclosed, ExitCode.changed, ExitCode.deleted, ExitCode.inuse } },
-    .{ .kind = .internal, .codes = &.{ ExitCode.zlib, ExitCode.memory, ExitCode.internal } },
+    .{ .kind = .entry, .codes = &.{ ExitCode.zipclosed, ExitCode.changed, ExitCode.deleted, ExitCode.inuse, ExitCode.cancelled } },
+    .{ .kind = .internal, .codes = &.{ ExitCode.zlib, ExitCode.memory, ExitCode.internal, ExitCode.data_length } },
 };
+
+pub fn kindFor(code: ExitCode) ?ErrorKind {
+    for (error_table) |error_group| {
+        if (std.mem.findScalar(ExitCode, error_group.codes, code) != null) {
+            return error_group.kind;
+        }
+    }
+    return null;
+}
+
+test "kindFor covers every ExitCode" {
+    inline for (@typeInfo(ExitCode).@"enum".fields) |field| {
+        const code: ExitCode = @enumFromInt(field.value);
+        if (code == .ok) continue;
+        if (kindFor(code) == null) {
+            // inline for unrolls at comptime, so field.name is a comptime string
+            std.debug.print("uncovered ExitCode: {s}\n", .{field.name});
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+test "kindFor returns null for ok" {
+    try std.testing.expectEqual(@as(?ErrorKind, null), kindFor(.ok));
+}
