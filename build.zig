@@ -39,7 +39,7 @@ pub fn build(b: *std.Build) void {
     const archhdr = sanitizeHeaders(b, headers, rubyarchhdrdir, "archhdr");
 
     const translate_c = b.addTranslateC(.{
-       .root_source_file = b.path("src/c.h"),
+        .root_source_file = b.path("src/c.h"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -65,12 +65,10 @@ pub fn build(b: *std.Build) void {
         // Later on we'll use this module as the root module of a test executable
         // which requires us to specify a target.
         .target = target,
-        .imports = &.{
-            .{
-                .name = "c",
-                .module = translate_c.createModule(),
-            }
-        }
+        .imports = &.{.{
+            .name = "c",
+            .module = translate_c.createModule(),
+        }},
     });
 
     // Here we define an executable. An executable needs to have a root module
@@ -234,16 +232,14 @@ fn isCommentOnlyDirective(line: []const u8) bool {
 }
 
 fn ruby_config(b: *std.Build, key: []const u8) ![]const u8 {
-    const result = try std.process.run(b.allocator, b.graph.io, .{
-       .argv = &.{
-           "ruby",
-           "-rrbconfig",
-           "-e",
-           "print RbConfig::CONFIG[ARGV[0]]",
-           "--",
-           key,
-       }
-    });
+    const result = try std.process.run(b.allocator, b.graph.io, .{ .argv = &.{
+        "ruby",
+        "-rrbconfig",
+        "-e",
+        "print RbConfig::CONFIG[ARGV[0]]",
+        "--",
+        key,
+    } });
     defer b.allocator.free(result.stdout);
     defer b.allocator.free(result.stderr);
 
