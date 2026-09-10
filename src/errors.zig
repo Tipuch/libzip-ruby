@@ -85,13 +85,36 @@ pub fn kindFor(code: ExitCode) ?ErrorKind {
     return null;
 }
 
+pub const ExitCodeCategory = union(enum) {
+    ok,
+    err: ErrorKind,
+    unknown: c_int,
+};
+
+pub fn categorize(raw: c_int) ExitCodeCategory {
+    const code = std.enums.fromInt(ExitCode, raw) orelse return .{ .unknown = raw };
+    if (kindFor(code)) |kind| return .{ .err = kind };
+    return .ok;
+}
+
+test "categorize: ok, known error, unknown code" {
+    try std.testing.expectEqual(ExitCodeCategory.ok, categorize(c.ZIP_ER_OK));
+
+    try std.testing.expectEqual(
+        ExitCodeCategory{ .err = .already_exists },
+        categorize(c.ZIP_ER_EXISTS),
+    );
+    try std.testing.expectEqual(
+        ExitCodeCategory{ .unknown = 999 },
+        categorize(999),
+    );
+}
+
 test "kindFor covers every ExitCode" {
-    inline for (@typeInfo(ExitCode).@"enum".fields) |field| {
-        const code: ExitCode = @enumFromInt(field.value);
+    inline for (std.enums.values(ExitCode)) |code| {
         if (code == .ok) continue;
         if (kindFor(code) == null) {
-            // inline for unrolls at comptime, so field.name is a comptime string
-            std.debug.print("uncovered ExitCode: {s}\n", .{field.name});
+            std.debug.print("uncovered ExitCode: {any}\n", .{code});
             return error.TestUnexpectedResult;
         }
     }
