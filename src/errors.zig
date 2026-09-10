@@ -40,7 +40,7 @@ pub const ExitCode = enum(c_int) {
     truncated_zip = c.ZIP_ER_TRUNCATED_ZIP, // N Possibly truncated or corrupted zip archive
 };
 
-const ErrorKind = enum {
+pub const ErrorKind = enum {
     unsupported,
     io,
     read,
@@ -76,6 +76,34 @@ const error_table = [_]ErrorGroup{
     .{ .kind = .internal, .codes = &.{ ExitCode.zlib, ExitCode.memory, ExitCode.internal, ExitCode.data_length } },
 };
 
+pub var base_error_class: c.VALUE = undefined;
+pub var error_class_registry: [std.enums.values(ErrorKind).len]c.VALUE = undefined;
+
+pub fn defineClasses(libzip: c.VALUE) void {
+    base_error_class = c.rb_define_class_under(libzip, "Error", c.rb_eStandardError);
+
+    inline for (std.enums.values(ErrorKind)) |kind| {
+        error_class_registry[@backingInt(kind)] = c.rb_define_class_under(libzip, comptime className(kind), base_error_class);
+    }
+}
+
+fn className(comptime kind: ErrorKind) [:0]const u8 {
+    comptime {
+        const tag = @tagName(kind);
+        var buf: []const u8 = "";
+        var upper = true;
+        for (tag) |ch| {
+            if (ch == '_') {
+                upper = true;
+                continue;
+            }
+            buf = buf ++ [_]u8{if (upper) std.ascii.toUpper(ch) else ch};
+            upper = false;
+        }
+        return buf ++ "Error";
+    }
+}
+
 pub fn kindFor(code: ExitCode) ?ErrorKind {
     for (error_table) |error_group| {
         if (std.mem.findScalar(ExitCode, error_group.codes, code) != null) {
@@ -95,6 +123,14 @@ pub fn categorize(raw: c_int) ExitCodeCategory {
     const code = std.enums.fromInt(ExitCode, raw) orelse return .{ .unknown = raw };
     if (kindFor(code)) |kind| return .{ .err = kind };
     return .ok;
+}
+
+test "className converts tags to Ruby names" {
+    try std.testing.expectEqualStrings("InternalError", comptime className(.internal));
+
+    try std.testing.expectEqualStrings("NotFoundError", comptime className(.not_found));
+
+    try std.testing.expectEqualStrings("IoError", comptime className(.io));
 }
 
 test "categorize: ok, known error, unknown code" {
