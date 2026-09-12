@@ -121,6 +121,15 @@ pub fn build(b: *std.Build) void {
     // make the two of them run in parallel.
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
+    const ruby_tests = b.addSystemCommand(&.{
+       "ruby",
+        "-I", "zig-out/lib",
+        "-e", "Dir.glob('test/**/*_test.rb').each { |f| require File.expand_path(f) }",
+    });
+
+    ruby_tests.setCwd(b.path("."));
+    ruby_tests.step.dependOn(b.getInstallStep());
+    test_step.dependOn(&ruby_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
