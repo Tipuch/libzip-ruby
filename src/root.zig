@@ -7,6 +7,7 @@ const archive = @import("archive.zig");
 const VERSION = "0.0.0";
 
 export fn Init_libzip_ruby() void {
+    archive.initIo();
     c.rb_ext_ractor_safe(true);
     const libzip = c.rb_define_module("LibZip");
     errors.defineClasses(libzip);

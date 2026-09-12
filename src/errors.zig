@@ -125,6 +125,16 @@ pub fn categorize(raw: c_int) ExitCodeCategory {
     return .ok;
 }
 
+pub fn raiseCode(raw: c_int) noreturn {
+    var zip_error: c.zip_error_t = undefined;
+    c.zip_error_init_with_code(&zip_error, raw);
+    const rb_class = switch(categorize(raw)) {
+        .err => |kind| error_class_registry[@intFromEnum(kind)],
+        .ok, .unknown => base_error_class,
+    };
+    c.rb_exc_raise(c.rb_exc_new_cstr(rb_class, c.zip_error_strerror(&zip_error)));
+}
+
 test "className converts tags to Ruby names" {
     try std.testing.expectEqualStrings("InternalError", comptime className(.internal));
 

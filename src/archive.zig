@@ -2,6 +2,14 @@ const std = @import("std");
 const c = @import("c");
 const errors = @import("errors.zig");
 
+var io_threaded: std.Io.Threaded = undefined;
+var io: std.Io = undefined;
+
+pub fn initIo() void {
+    io_threaded = std.Io.Threaded.init_single_threaded;
+    io = io_threaded.io();
+}
+
 const File = struct {
     archive: ?*c.zip_t,
 };
@@ -31,6 +39,7 @@ pub fn defineClass(libzip: c.VALUE) void {
     c.rb_define_method(file_class, "closed?", @ptrCast(&fileClosed), 0);
     c.rb_define_method(file_class, "close", @ptrCast(&closeFile), 0);
     c.rb_define_singleton_method(file_class, "open", @ptrCast(&openFile), -1);
+    c.rb_define_method(file_class, "add", @ptrCast(&addFile), 2);
 }
 
 fn fileClosed(self: c.VALUE) callconv(.c) c.VALUE {
@@ -68,12 +77,7 @@ fn openFile(argc: c_int, argv: [*c]c.VALUE, klass: c.VALUE) callconv(.c) c.VALUE
     if (maybe_archive == null) {
         var zip_error: c.zip_error_t = undefined;
         c.zip_error_init_with_code(&zip_error, zip_exit_code);
-        const msg = c.zip_error_strerror(&zip_error);
-        const exception_class = switch (errors.categorize(zip_exit_code)) {
-            .err => |kind| errors.error_class_registry[@backingInt(kind)],
-            .ok, .unknown => errors.base_error_class,
-        };
-        c.rb_exc_raise(c.rb_exc_new_cstr(exception_class, msg));
+        errors.raiseCode(zip_exit_code);
     }
 
     const archive = maybe_archive.?;
@@ -92,16 +96,59 @@ fn closeFile(self: c.VALUE) callconv(.c) c.VALUE {
     if (c.zip_close(archive) < 0) {
         const zip_error = c.zip_get_error(archive);
         const zip_exit_code = c.zip_error_code_zip(zip_error);
-        const message = c.zip_error_strerror(zip_error);
-        const exception_class = switch (errors.categorize(zip_exit_code)) {
-            .err => |kind| errors.error_class_registry[@backingInt(kind)],
-            .ok, .unknown => errors.base_error_class,
-        };
         _ = c.zip_discard(archive);
         file.archive = null;
-        c.rb_exc_raise(c.rb_exc_new_cstr(exception_class, message));
+        errors.raiseCode(zip_exit_code);
     }
 
     file.archive = null;
     return c.Qnil;
+}
+
+fn addFile(self: c.VALUE, name_val: c.VALUE, src_val: c.VALUE) callconv(.c) c.VALUE {
+    const file = getFile(self);
+    const archive = file.archive orelse {
+        c.rb_raise(errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .entry))], "archive already closed");
+    };
+
+    var name_v = name_val;
+    var src_v = src_val;
+    const name = c.rb_string_value_cstr(&name_v);
+    const src = c.rb_string_value_cstr(&src_v);
+
+    const src_path = std.mem.span(src);
+    const stat = std.Io.Dir.cwd().statFile(io, src_path, .{}) catch |err| {
+        const kind: errors.ErrorKind = switch (err) {
+            error.FileNotFound => .not_found,
+            error.AccessDenied => .permission,
+            else => .io,
+        };
+        c.rb_raise(
+            errors.error_class_registry[@intFromEnum(kind)],
+            "can't open source file at %s", src,
+        );
+    };
+    if (stat.kind != .file) {
+        c.rb_raise(errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .invalid_argument))],
+            "%s is not a regular file", src);
+    }
+
+    const zip_src = c.zip_source_file(archive, src, 0, -1);
+    if (zip_src == null) {
+        const zip_error = c.zip_get_error(archive);
+        const zip_exit_code = c.zip_error_code_zip(zip_error);
+        _ = c.zip_discard(archive);
+        file.archive = null;
+        errors.raiseCode(zip_exit_code);
+    }
+
+    if (c.zip_file_add(archive, name, zip_src, c.ZIP_FL_OVERWRITE) < 0) {
+        const zip_error = c.zip_get_error(archive);
+        const zip_exit_code = c.zip_error_code_zip(zip_error);
+        c.zip_source_free(zip_src);
+        file.archive = null;
+        errors.raiseCode(zip_exit_code);
+    }
+
+    return self;
 }
