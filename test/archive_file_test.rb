@@ -63,4 +63,18 @@ class ArchiveFileTest < Minitest::Test
       end
       refute File.exist?(@zip_path)  # discarded, not committed
     end
+
+    def test_read_roundtrip
+        LibZip::File.open(@zip_path, create: true) { |z| z.add("a.txt", @src) }
+        zip = LibZip::File.open(@zip_path)
+        assert_equal "hello", zip.read("a.txt")
+        zip.close
+    end
+
+    def test_read_missing_entry_raises_not_found
+        LibZip::File.open(@zip_path, create: true) { |z| z.add("a.txt", @src) }
+        zip = LibZip::File.open(@zip_path)
+        assert_raises(LibZip::NotFoundError) { zip.read("ghost.txt") }
+        zip.close
+    end
 end

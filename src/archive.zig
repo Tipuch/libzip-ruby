@@ -1,6 +1,7 @@
 const std = @import("std");
 const c = @import("c");
 const errors = @import("errors.zig");
+const output_stream = @import("output_stream.zig");
 
 var io_threaded: std.Io.Threaded = undefined;
 var io: std.Io = undefined;
@@ -40,6 +41,8 @@ pub fn defineClass(libzip: c.VALUE) void {
     c.rb_define_method(file_class, "close", @ptrCast(&closeFile), 0);
     c.rb_define_singleton_method(file_class, "open", @ptrCast(&openFile), -1);
     c.rb_define_method(file_class, "add", @ptrCast(&addFile), 2);
+    c.rb_define_method(file_class, "read", @ptrCast(&readFile), 1);
+    c.rb_define_method(file_class, "get_output_stream", @ptrCast(&getOutputStream), 1);
 }
 
 fn fileClosed(self: c.VALUE) callconv(.c) c.VALUE {
@@ -83,11 +86,11 @@ fn openFile(argc: c_int, argv: [*c]c.VALUE, klass: c.VALUE) callconv(.c) c.VALUE
     const file: *File = @ptrCast(@alignCast(c.ruby_xmalloc(@sizeOf(File))));
     file.* = .{ .archive = archive };
     const obj = c.TypedData_Wrap_Struct(file_class, &file_type, file);
-    
+
     if (c.rb_block_given_p() != 0) {
         return c.rb_ensure(@ptrCast(&openBody), obj, @ptrCast(&openEnsure), obj);
     }
-    
+
     return obj;
 }
 
@@ -147,13 +150,13 @@ fn addFile(self: c.VALUE, name_val: c.VALUE, src_val: c.VALUE) callconv(.c) c.VA
             else => .io,
         };
         c.rb_raise(
-            errors.error_class_registry[@intFromEnum(kind)],
-            "can't open source file at %s", src,
+            errors.error_class_registry[@backingInt(kind)],
+            "can't open source file at %s",
+            src,
         );
     };
     if (stat.kind != .file) {
-        c.rb_raise(errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .invalid_argument))],
-            "%s is not a regular file", src);
+        c.rb_raise(errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .invalid_argument))], "%s is not a regular file", src);
     }
 
     const zip_src = c.zip_source_file(archive, src, 0, -1);
@@ -174,4 +177,45 @@ fn addFile(self: c.VALUE, name_val: c.VALUE, src_val: c.VALUE) callconv(.c) c.VA
     }
 
     return self;
+}
+
+fn readFile(self: c.VALUE, name_val: c.VALUE) callconv(.c) c.VALUE {
+    const file = getFile(self);
+    const archive = file.archive orelse {
+        c.rb_raise(errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .entry))], "archive already closed");
+    };
+
+    var name_v = name_val;
+    const name = c.rb_string_value_cstr(&name_v);
+
+    var stat: c.zip_stat_t = undefined;
+    if (c.zip_stat(archive, name, 0, &stat) < 0) {
+        errors.raiseCode(c.zip_error_code_zip(c.zip_get_error(archive)));
+    }
+
+    const zip_file = c.zip_fopen(archive, name, 0) orelse {
+        errors.raiseCode(c.zip_error_code_zip(c.zip_get_error(archive)));
+    };
+
+    const result = c.rb_str_new(null, @intCast(stat.size));
+    const read_exit_code = c.zip_fread(zip_file, c.RSTRING_PTR(result), stat.size);
+    _ = c.zip_fclose(zip_file);
+
+    if (read_exit_code < 0 or @as(u64, @intCast(read_exit_code)) != stat.size) {
+        errors.raiseCode(c.zip_error_code_zip(c.zip_get_error(archive)));
+    }
+
+    return result;
+}
+
+fn getOutputStream(self: c.VALUE, name_rb: c.VALUE) callconv(.c) c.VALUE {
+    const file = getFile(self);
+    const archive = file.archive orelse {
+        c.rb_raise(errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .entry))], "archive already closed");
+    };
+
+    var name_v = name_rb;
+    _ = c.rb_string_value_cstr(&name_v);
+
+    return output_stream.create(archive, self, name_v);
 }

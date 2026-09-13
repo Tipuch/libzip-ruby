@@ -128,8 +128,8 @@ pub fn categorize(raw: c_int) ExitCodeCategory {
 pub fn raiseCode(raw: c_int) noreturn {
     var zip_error: c.zip_error_t = undefined;
     c.zip_error_init_with_code(&zip_error, raw);
-    const rb_class = switch(categorize(raw)) {
-        .err => |kind| error_class_registry[@intFromEnum(kind)],
+    const rb_class = switch (categorize(raw)) {
+        .err => |kind| error_class_registry[@backingInt(kind)],
         .ok, .unknown => base_error_class,
     };
     c.rb_exc_raise(c.rb_exc_new_cstr(rb_class, c.zip_error_strerror(&zip_error)));

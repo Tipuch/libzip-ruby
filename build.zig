@@ -122,9 +122,11 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
     const ruby_tests = b.addSystemCommand(&.{
-       "ruby",
-        "-I", "zig-out/lib",
-        "-e", "Dir.glob('test/**/*_test.rb').each { |f| require File.expand_path(f) }",
+        "ruby",
+        "-I",
+        "zig-out/lib",
+        "-e",
+        "Dir.glob('test/**/*_test.rb').each { |f| require File.expand_path(f) }",
     });
 
     ruby_tests.setCwd(b.path("."));
