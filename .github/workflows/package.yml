@@ -1,0 +1,137 @@
+name: package
+
+# Builds libzip_ruby for every (platform, Ruby ABI) pair and wraps each platform
+# into a gem.  Nothing but Zig is needed for the Linux targets: Zig cross-
+# compiles all four from one runner, and the two Darwin platforms from one macOS
+# runner.  The matrix itself comes from `script/package matrix`, so the target
+# list lives in exactly one place.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      rubies:
+        description: Ruby ABIs to build (comma separated)
+        default: "3.3,3.4,4.0"
+      publish:
+        description: Push the resulting gems to RubyGems
+        type: boolean
+        default: false
+
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  matrix:
+    runs-on: ubuntu-24.04
+    outputs:
+      compile: ${{ steps.emit.outputs.compile }}
+      gem: ${{ steps.emit.outputs.gem }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+      - name: Emit matrix
+        id: emit
+        run: |
+          script/package matrix --rubies="$RUBIES" > matrix.json
+          ruby -rjson -e '
+            m = JSON.parse(File.read("matrix.json"))
+            File.write(ENV["GITHUB_OUTPUT"], "compile=#{m["compile"].to_json}\ngem=#{m["gem"].to_json}\n", mode: "a")
+          '
+          cat matrix.json
+        env:
+          # On a tag push `inputs` is empty, so fall back to the default set.
+          RUBIES: ${{ inputs.rubies || '3.3,3.4,4.0' }}
+
+  compile:
+    name: compile ${{ matrix.os }} ruby ${{ matrix.ruby }}
+    needs: matrix
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.matrix.outputs.compile) }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # mise.toml is the single source of truth for the Zig version.  It says
+      # `zig = "master"` today, which floats; pin an exact `0.17.0-dev.<n>`
+      # build when you want CI to be reproducible over time.
+      - uses: jdx/mise-action@v2
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: false
+
+      - name: Build
+        run: script/package build --targets=${{ join(matrix.targets, ',') }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: so-${{ matrix.os }}-${{ matrix.ruby }}
+          path: pkg/*/lib
+          if-no-files-found: error
+
+  gem:
+    name: gem ${{ matrix.platform }}
+    needs: [matrix, compile]
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.matrix.outputs.gem) }}
+    # `gem build` only reads a gemspec, and the platform comes from an env var,
+    # so any machine can assemble any platform's gem.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: so-*
+          path: pkg
+          merge-multiple: true
+
+      - name: Assemble
+        run: script/package gem --targets=${{ matrix.platform }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gem-${{ matrix.platform }}
+          path: pkg/*.gem
+          if-no-files-found: error
+
+  release:
+    name: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: gem
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: gem-*
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.gem
+
+      # Swap in `rubygems/release-gem@v1` if you would rather use RubyGems
+      # trusted publishing (OIDC) than a long-lived API key.
+      - name: Push to RubyGems
+        env:
+          GEM_HOST_API_KEY: ${{ secrets.RUBYGEMS_API_KEY }}
+        if: ${{ env.GEM_HOST_API_KEY != '' }}
+        run: |
+          for file in dist/*.gem; do
+            gem push "$file"
+          done

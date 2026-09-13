@@ -1,0 +1,309 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# script/package - build libzip_ruby for a matrix of platforms and Ruby ABIs,
+# and wrap the results into platform gems.
+#
+#   script/package list                       what can be built here
+#   script/package matrix                     the CI matrix, as JSON
+#   script/package build [--targets=LIST]     compile for the *current* Ruby
+#   script/package gem   [--targets=LIST]     assemble .gem files
+#   script/package all   [--targets=LIST] [--rubies=LIST]
+#   script/package clean
+#
+# LIST is comma-separated, or `all`.  Targets default to every platform this
+# host can build; rubies default to the running Ruby only.  `all
+# --rubies=3.3,3.4,4.0` switches interpreter for each ABI via `mise exec
+# ruby@X`, so it installs those Rubies on demand (a source build, several
+# minutes each, once).
+#
+# Layout:  pkg/<gem-platform>/lib/libzip_ruby/<ruby-abi>/libzip_ruby.<ext>
+#          pkg/<gem-platform>/   is the gem root handed to `gem build`
+#          pkg/libzip-ruby-<version>-<platform>.gem
+
+require "fileutils"
+require "json"
+require "optparse"
+require "rbconfig"
+
+ROOT = File.expand_path("..", __dir__)
+PKG_DIR = File.join(ROOT, "pkg")
+GEMSPEC = "libzip-ruby.gemspec"
+
+# One entry per *gem* platform, which is not the same thing as a Zig triple:
+# Ruby reports `x86_64-linux` whether libc is glibc or musl, and macOS is
+# `arm64-darwin`, not `aarch64-macos`.
+TARGETS = {
+  "x86_64-linux"       => { zig: "x86_64-linux-gnu",   ext: "so",     os: "linux"  },
+  "aarch64-linux"      => { zig: "aarch64-linux-gnu",  ext: "so",     os: "linux"  },
+  "x86_64-linux-musl"  => { zig: "x86_64-linux-musl",  ext: "so",     os: "linux"  },
+  "aarch64-linux-musl" => { zig: "aarch64-linux-musl", ext: "so",     os: "linux"  },
+  "x86_64-darwin"      => { zig: "x86_64-macos",       ext: "bundle", os: "darwin" },
+  "arm64-darwin"       => { zig: "aarch64-macos",      ext: "bundle", os: "darwin" },
+}.freeze
+
+# macOS runners are arm64, but Zig cross-compiles x86_64-darwin from arm64 just
+# as happily, so one runner covers both Darwin platforms (the Ruby headers of
+# either Darwin arch are ABI-compatible with the other).  Likewise one Linux
+# runner covers all four Linux targets.
+RUNNERS = { "linux" => "ubuntu-24.04", "darwin" => "macos-15" }.freeze
+
+# The ABIs the published gems carry a compiled extension for.  Matches
+# required_ruby_version in libzip-ruby.gemspec; Ruby 3.2 is EOL as of 2026-03
+# and deliberately not supported.
+DEFAULT_RUBIES = %w[3.3 3.4 4.0].freeze
+
+class Packager
+  def initialize(options)
+    @options = options
+  end
+
+  # -- host ---------------------------------------------------------------
+
+  def host_os = RbConfig::CONFIG["host_os"].match?(/darwin/) ? "darwin" : "linux"
+
+  # "4.0.0" -> "4.0".  Ruby's *API* version: an extension built against it loads
+  # on any patch release of that minor, which is exactly the granularity we want.
+  def ruby_abi = RbConfig::CONFIG["ruby_version"][/\A\d+\.\d+/]
+
+  def host_targets = TARGETS.select { |_, t| t[:os] == host_os }.keys
+
+  # -- paths --------------------------------------------------------------
+
+  def gem_root(platform) = File.join(PKG_DIR, platform)
+  # Scratch install prefix for zig, hidden inside the gem root so it can never
+  # be picked up by the gemspec's globs.
+  def build_prefix(platform) = File.join(gem_root(platform), ".build")
+
+  def extension(platform, abi = ruby_abi)
+    File.join(gem_root(platform), "lib", "libzip_ruby", abi, "libzip_ruby.#{TARGETS.fetch(platform)[:ext]}")
+  end
+
+  # -- commands -----------------------------------------------------------
+
+  def list
+    printf "%-20s %-22s %-7s %s\n", "gem platform", "zig target", "ext", "buildable here"
+    TARGETS.each do |platform, t|
+      printf "%-20s %-22s %-7s %s\n", platform, t[:zig], t[:ext], t[:os] == host_os ? "yes" : "-"
+    end
+    puts
+    puts "default rubies : #{DEFAULT_RUBIES.join(', ')}"
+    puts "running ruby   : #{RUBY_DESCRIPTION}"
+    puts "output         : #{relative PKG_DIR}"
+  end
+
+  def matrix
+    compile = RUNNERS.flat_map do |os, runner|
+      targets = TARGETS.select { |_, t| t[:os] == os }.keys
+      (options[:rubies] || DEFAULT_RUBIES).map do |ruby|
+        { "os" => os, "runner" => runner, "ruby" => ruby, "targets" => targets }
+      end
+    end
+    puts JSON.pretty_generate(
+      "compile" => compile,
+      "gem" => TARGETS.keys.map { |platform| { "platform" => platform } }
+    )
+  end
+
+  def build
+    targets.each { |platform| build_one platform }
+  end
+
+  def gem
+    targets.each do |platform|
+      root = gem_root(platform)
+      compiled = Dir[File.join(root, "lib", "libzip_ruby", "*", "libzip_ruby.*")]
+      abort "no compiled extensions under #{relative root} - run `script/package build` first" if compiled.empty?
+      abis = compiled.map { |so| File.basename(File.dirname(so)) }.sort
+
+      # Rebuild the gem root from scratch, so a stale ABI or a leftover from an
+      # earlier run can never end up inside a published gem.  The compiled
+      # extensions are the one thing we carry over.
+      stash = File.join(PKG_DIR, ".stash")
+      FileUtils.rm_rf stash
+      compiled.each do |so|
+        FileUtils.mkdir_p File.join(stash, File.basename(File.dirname(so)))
+        FileUtils.mv so, File.join(stash, File.basename(File.dirname(so)), File.basename(so))
+      end
+
+      FileUtils.rm_rf File.join(root, "lib")
+      FileUtils.rm_rf build_prefix(platform)
+      FileUtils.cp_r File.join(ROOT, "lib"), root
+      # Whatever built in-tree stays in-tree: pkg/ is the only source of .so.
+      FileUtils.rm_rf File.join(root, "lib", "libzip_ruby")
+      abis.each do |abi|
+        FileUtils.mkdir_p File.join(root, "lib", "libzip_ruby", abi)
+        FileUtils.mv File.join(stash, abi, "libzip_ruby.#{TARGETS.fetch(platform)[:ext]}"),
+                     File.join(root, "lib", "libzip_ruby", abi)
+      end
+      FileUtils.rm_rf stash
+      FileUtils.cp File.join(ROOT, GEMSPEC), root
+
+      say "gem #{platform}  (#{abis.size} abi: #{abis.join(', ')})"
+      # The gemspec globs `lib/**/*` relative to its own directory, so `gem
+      # build` has to run inside the gem root; LIBZIP_RUBY_PLATFORM is what it
+      # reads to stamp the right Gem::Platform.
+      sh({ "LIBZIP_RUBY_PLATFORM" => platform }, "gem", "build", GEMSPEC, chdir: root)
+
+      built = Dir[File.join(root, "*.gem")]
+      abort "gem build produced nothing in #{relative root}" if built.empty?
+      built.each { |file| FileUtils.mv file, PKG_DIR }
+      say "  -> #{relative File.join(PKG_DIR, File.basename(built.first))}"
+    end
+  end
+
+  def all
+    (options[:rubies] || [ruby_abi]).each do |abi|
+      if abi == ruby_abi
+        targets.each { |platform| build_one platform }
+      else
+        # Same script, different interpreter: mise puts ruby@X first on PATH and
+        # the child inherits --targets.  It skips anything already built.
+        say "switch to ruby #{abi}"
+        sh "mise", "exec", "ruby@#{abi}", "--", File.join(ROOT, "script", "package"),
+           "build", "--targets=#{targets.join(',')}"
+      end
+    end
+    gem
+  end
+
+  def clean
+    FileUtils.rm_rf PKG_DIR
+    say "removed #{relative PKG_DIR}"
+  end
+
+  # -- helpers ------------------------------------------------------------
+
+  def options = @options
+
+  def build_one(platform)
+    abi = ruby_abi
+    dest = extension(platform, abi)
+    if File.exist?(dest) && !options[:force]
+      say "skip #{platform}/#{abi} (already built, --force to redo)"
+      return
+    end
+
+    say "build #{platform} (#{TARGETS.fetch(platform)[:zig]}) for ruby #{abi}"
+    prefix = build_prefix(platform)
+    FileUtils.rm_rf prefix
+    sh "zig", "build",
+       "-Dtarget=#{TARGETS.fetch(platform)[:zig]}",
+       "-Doptimize=#{options[:optimize]}",
+       "--prefix", prefix
+
+    # zig installs exactly one artifact: libzip_ruby.so, or libzip_ruby.dylib on
+    # Darwin, where Ruby wants the file named .bundle.
+    produced = Dir[File.join(prefix, "lib", "libzip_ruby.*")]
+    abort "expected one artifact under #{relative prefix}/lib, found #{produced.inspect}" unless produced.size == 1
+
+    verify_extension produced.first, platform
+    FileUtils.mkdir_p File.dirname(dest)
+    FileUtils.mv produced.first, dest
+    say "  -> #{relative dest}"
+  end
+
+  def targets
+    list = options[:targets]
+    # `all` means every platform *this host* can build, not every platform that
+    # exists: the cross-OS ones need their own headers (see below).
+    list = host_targets if list == ["all"]
+    list ||= host_targets
+
+    unknown = list - TARGETS.keys
+    abort "unknown target(s): #{unknown.join(', ')} (see `script/package list`)" unless unknown.empty?
+
+    foreign = list.reject { |platform| TARGETS.fetch(platform)[:os] == host_os }
+    if !foreign.empty? && !options[:force_cross]
+      abort <<~MSG
+        #{foreign.join(', ')} cannot be built correctly on this #{host_os} host: the
+        sources would be compiled against this host's Ruby headers, which are the
+        wrong ones for that platform.  CI builds those on their own runners.
+        Pass --force-cross if you know what you are doing anyway (headers aside,
+        Zig really can emit a working Mach-O or ELF for another platform).
+      MSG
+    end
+    list
+  end
+
+  # A gem must not drag in another libzip or zlib: the whole point of vendoring
+  # them is that this extension is self-contained and can neither be preempted
+  # by, nor preempt, the copy some other gem loaded first.
+  def verify_extension(path, platform)
+    if TARGETS.fetch(platform)[:os] == "linux"
+      needed = capture("readelf", "-d", path).lines.grep(/NEEDED/)
+      symbols = capture("nm", "-D", "--defined-only", path)
+    else
+      needed = capture("otool", "-L", path).lines.drop(1) # first line is the file
+      symbols = capture("nm", "-gU", path)
+    end
+
+    leaked = needed.reject { |line| line.match?(/libc\.so|libSystem|ld-linux|libm\.so/) }
+    abort "unexpected dependencies in #{File.basename(path)}:\n#{leaked.join}" unless leaked.empty?
+    abort "#{File.basename(path)} does not export Init_libzip_ruby" unless symbols.match?(/Init_libzip_ruby/)
+  end
+
+  def capture(*cmd)
+    output = IO.popen(cmd, chdir: ROOT, &:read)
+    abort "command failed: #{cmd.join(' ')}" unless $?.success?
+    output
+  end
+
+  def sh(*cmd, env: {}, chdir: ROOT)
+    # A leading Hash is the environment, `sh({"A" => "1"}, "cmd", "arg")`.
+    env = cmd.shift if cmd.first.is_a?(Hash)
+    say "  $ #{cmd.join(' ')}" if options[:verbose]
+    system(env, *cmd, chdir: chdir) or abort("command failed: #{cmd.join(' ')}")
+  end
+
+  def say(message) = puts(message)
+
+  def relative(path) = path.delete_prefix("#{ROOT}/")
+end
+
+options = {
+  targets: nil,
+  rubies: nil,
+  optimize: "ReleaseFast",
+  force: false,
+  force_cross: false,
+  verbose: false,
+}
+
+parser = OptionParser.new do |o|
+  o.banner = "usage: script/package COMMAND [options]"
+  o.separator ""
+  o.separator "commands: list | matrix | build | gem | all | clean"
+  o.separator ""
+  o.on("--targets=LIST", "comma-separated gem platforms, or `all` (default: host)") do |value|
+    options[:targets] = value.split(",").map(&:strip)
+  end
+  o.on("--rubies=LIST", "comma-separated ABIs for `all` (default: current ruby)") do |value|
+    options[:rubies] = value.split(",").map(&:strip)
+  end
+  o.on("--optimize=MODE", "Debug|ReleaseSafe|ReleaseFast|ReleaseSmall (default: ReleaseFast)") do |value|
+    options[:optimize] = value
+  end
+  o.on("--force", "rebuild even when the extension already exists") { options[:force] = true }
+  o.on("--force-cross", "allow building for another OS on this host") { options[:force_cross] = true }
+  o.on("--verbose", "echo every command as it runs") { options[:verbose] = true }
+  o.on("-h", "--help") do
+    puts o
+    exit
+  end
+end
+
+parser.parse!(ARGV)
+command = ARGV.shift
+abort(parser.to_s) unless %w[list matrix build gem all clean].include?(command)
+
+packager = Packager.new(options)
+
+case command
+when "list"   then packager.list
+when "matrix" then packager.matrix
+when "build"  then packager.build
+when "gem"    then packager.gem
+when "all"    then packager.all
+when "clean"  then packager.clean
+end

@@ -5,7 +5,11 @@ const errors = @import("errors.zig");
 const archive = @import("archive.zig");
 const output_stream = @import("output_stream.zig");
 
-const VERSION = "0.0.0";
+// Stamped by build.zig from libzip-ruby.gemspec, the single source of truth
+// for the version, so LibZip::VERSION and the released .gem agree by
+// construction rather than by discipline.
+const build_options = @import("build_options");
+const VERSION: [:0]const u8 = build_options.version;
 
 export fn Init_libzip_ruby() void {
     archive.initIo();

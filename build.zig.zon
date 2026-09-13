@@ -32,6 +32,14 @@
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
     .dependencies = .{
+        .libzip = .{
+            .url = "https://libzip.org/download/libzip-1.11.4.tar.gz",
+            .hash = "N-V-__8AAIGWXwDb3q2kABh4z-r1aO2vLvZnKmf5aLSaRxk-",
+        },
+        .zlib = .{
+            .url = "https://github.com/madler/zlib/releases/download/v1.3.2/zlib-1.3.2.tar.gz",
+            .hash = "N-V-__8AAJ2cNgAgfBtAw33Bxfu1IWISDeKKSr3DAqoAysIJ",
+        },
         // See `zig fetch --save <url>` for a command-line interface for adding dependencies.
         //.example = .{
         //    // When updating this field to a new URL, be sure to delete the corresponding
@@ -74,6 +82,8 @@
         "build.zig",
         "build.zig.zon",
         "src",
+        // Build tooling run as a host step (gen_zip_err_str.zig).
+        "build",
         // For example...
         //"LICENSE",
         //"README.md",

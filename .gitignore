@@ -2,3 +2,5 @@
 zig-out/
 *.o
 .idea/
+zig-pkg/
+pkg/
