@@ -75,8 +75,6 @@ fn openFile(argc: c_int, argv: [*c]c.VALUE, klass: c.VALUE) callconv(.c) c.VALUE
     const maybe_archive = c.zip_open(path, flags, &zip_exit_code);
 
     if (maybe_archive == null) {
-        var zip_error: c.zip_error_t = undefined;
-        c.zip_error_init_with_code(&zip_error, zip_exit_code);
         errors.raiseCode(zip_exit_code);
     }
 
@@ -84,15 +82,42 @@ fn openFile(argc: c_int, argv: [*c]c.VALUE, klass: c.VALUE) callconv(.c) c.VALUE
 
     const file: *File = @ptrCast(@alignCast(c.ruby_xmalloc(@sizeOf(File))));
     file.* = .{ .archive = archive };
-    return c.TypedData_Wrap_Struct(file_class, &file_type, file);
+    const obj = c.TypedData_Wrap_Struct(file_class, &file_type, file);
+    
+    if (c.rb_block_given_p() != 0) {
+        return c.rb_ensure(@ptrCast(&openBody), obj, @ptrCast(&openEnsure), obj);
+    }
+    
+    return obj;
+}
+
+fn openBody(obj: c.VALUE) callconv(.c) c.VALUE {
+    const result = c.rb_yield(obj);
+    closeFileLibzip(getFile(obj));
+    return result;
+}
+
+fn openEnsure(obj: c.VALUE) callconv(.c) c.VALUE {
+    const file = getFile(obj);
+    if (file.archive) |archive| {
+        _ = c.zip_discard(archive);
+        file.archive = null;
+    }
+    return c.Qnil;
 }
 
 fn closeFile(self: c.VALUE) callconv(.c) c.VALUE {
     const file = getFile(self);
-    const archive = file.archive orelse {
+    if (file.archive == null) {
         c.rb_raise(errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .entry))], "archive already closed");
-    };
+    }
 
+    closeFileLibzip(file);
+    return c.Qnil;
+}
+
+fn closeFileLibzip(file: *File) void {
+    const archive = file.archive orelse return;
     if (c.zip_close(archive) < 0) {
         const zip_error = c.zip_get_error(archive);
         const zip_exit_code = c.zip_error_code_zip(zip_error);
@@ -100,9 +125,7 @@ fn closeFile(self: c.VALUE) callconv(.c) c.VALUE {
         file.archive = null;
         errors.raiseCode(zip_exit_code);
     }
-
     file.archive = null;
-    return c.Qnil;
 }
 
 fn addFile(self: c.VALUE, name_val: c.VALUE, src_val: c.VALUE) callconv(.c) c.VALUE {
