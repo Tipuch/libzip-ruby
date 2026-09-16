@@ -47,12 +47,13 @@ fn freeEntry(raw: ?*anyopaque) callconv(.c) void {
 }
 
 pub fn createEntry(archive_rb: c.VALUE, index: c.zip_uint64_t, stat: *const c.zip_stat_t, is_dir: bool) c.VALUE {
-    const name = if (stat.name) c.rb_utf8_str_new_cstr(stat.name) else c.rb_utf8_str_new_cstr("");
+    const name: [*:0]const u8 = stat.name orelse "";
     const entry: *Entry = @ptrCast(@alignCast(c.ruby_xmalloc(@sizeOf(Entry))));
     entry.* = .{
         .archive_rb = archive_rb,
         .index = index,
-        .name_rb = name,
+        .name_rb = c.rb_utf8_str_new_cstr(name),
+        .valid = stat.valid,
         .comment_rb = c.Qnil,
         .size = stat.size,
         .comp_size = stat.comp_size,
@@ -112,6 +113,9 @@ fn entryCompressedSize(self: c.VALUE) callconv(.c) c.VALUE {
     return c.ULL2NUM(getEntry(self).comp_size);
 }
 fn entryCrc(self: c.VALUE) callconv(.c) c.VALUE {
+    const entry = getEntry(self);
+
+    if (entry.valid & c.ZIP_STAT_CRC == 0) return c.Qnil;
     return c.UINT2NUM(getEntry(self).crc);
 }
 

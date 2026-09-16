@@ -7,6 +7,10 @@ const output_stream = @import("output_stream.zig");
 var io_threaded: std.Io.Threaded = undefined;
 var io: std.Io = undefined;
 
+var fnm_pathname: c_int = 0;
+var fnm_dotmatch: c_int = 0;
+var fnm_extglob: c_int = 0;
+
 pub fn initIo() void {
     io_threaded = std.Io.Threaded.init_single_threaded;
     io = io_threaded.io();
@@ -38,12 +42,27 @@ pub var file_class: c.VALUE = undefined;
 pub fn defineClass(libzip: c.VALUE) void {
     file_class = c.rb_define_class_under(libzip, "File", c.rb_cObject);
     c.rb_undef_alloc_func(file_class);
+    fnm_pathname = c.NUM2INT(c.rb_const_get(c.rb_cFile, c.rb_intern("FNM_PATHNAME")));
+    fnm_dotmatch = c.NUM2INT(c.rb_const_get(c.rb_cFile, c.rb_intern("FNM_DOTMATCH")));
+    fnm_extglob = c.NUM2INT(c.rb_const_get(c.rb_cFile, c.rb_intern("FNM_EXTGLOB")));
+    c.rb_include_module(file_class, c.rb_mEnumerable);
     c.rb_define_method(file_class, "closed?", @ptrCast(&fileClosed), 0);
     c.rb_define_method(file_class, "close", @ptrCast(&closeFile), 0);
     c.rb_define_singleton_method(file_class, "open", @ptrCast(&openFile), -1);
     c.rb_define_method(file_class, "add", @ptrCast(&addFile), 2);
     c.rb_define_method(file_class, "read", @ptrCast(&readFile), 1);
     c.rb_define_method(file_class, "get_output_stream", @ptrCast(&getOutputStream), 1);
+    c.rb_define_method(file_class, "entries", @ptrCast(&entries), 0);
+    c.rb_define_method(file_class, "each", @ptrCast(&eachEntry), 0);
+    c.rb_define_method(file_class, "each_entry", @ptrCast(&eachEntry), 0);
+    c.rb_define_method(file_class, "names", @ptrCast(&names), 0);
+    c.rb_define_method(file_class, "size", @ptrCast(&countEntries), 0);
+    c.rb_define_method(file_class, "length", @ptrCast(&countEntries), 0);
+    c.rb_define_method(file_class, "include?", @ptrCast(&includeEntry), 1);
+    c.rb_define_method(file_class, "find_entry", @ptrCast(&findEntry), 1);
+    c.rb_define_method(file_class, "get_entry", @ptrCast(&getEntryByName), 1);
+    c.rb_define_method(file_class, "[]", @ptrCast(&findEntry), 1);
+    c.rb_define_method(file_class, "glob", @ptrCast(&glob), 1);
 }
 
 fn fileClosed(self: c.VALUE) callconv(.c) c.VALUE {
@@ -242,16 +261,16 @@ fn entries(self: c.VALUE) callconv(.c) c.VALUE {
     var i: c.zip_uint64_t = 0;
     while (i < @as(c.zip_uint64_t, @intCast(num_entries))) : (i += 1) {
         const obj = statEntry(self, file, i);
-        if (obj != c.Qnil) c.rb_ary_push(ary, obj);
+        if (obj != c.Qnil) _ = c.rb_ary_push(ary, obj);
     }
     return ary;
 }
 
 fn eachEntry(self: c.VALUE) callconv(.c) c.VALUE {
-    if (c.rb_block_given_p() == 0) return c.rb_enumeratorize(self, c.rb_intern("each_entry"), 0, null);
+    if (c.rb_block_given_p() == 0) return c.rb_enumeratorize(self, c.rb_id2sym(c.rb_intern("each_entry")), 0, null);
     const list = entries(self);
     var i: c_long = 0;
-    while (i < c.RARRAY_LEN(list)) : (i += 1) c.rb_yield(c.rb_ary_entry(list, i));
+    while (i < c.RARRAY_LEN(list)) : (i += 1) _ = c.rb_yield(c.rb_ary_entry(list, i));
     return list;
 }
 
@@ -263,4 +282,95 @@ fn isDirectory(archive: *c.zip_t, index: c.zip_uint64_t, name: [*c]const u8) boo
     var attrs: c.zip_uint32_t = 0;
     if (c.zip_file_get_external_attributes(archive, index, 0, &opsys, &attrs) < 0) return false;
     return entry.attributesAreDirectory(opsys, attrs);
+}
+
+fn countEntries(self: c.VALUE) callconv(.c) c.VALUE {
+    const file = getFile(self);
+    const archive = file.archive orelse {
+        c.rb_raise(errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .entry))], "archive already closed");
+    };
+    const num_entries = c.zip_get_num_entries(archive, 0);
+    if (num_entries < 0) errors.raiseCode(c.zip_error_code_zip(c.zip_get_error(archive)));
+    return c.ULL2NUM(@intCast(num_entries));
+}
+
+fn findEntry(self: c.VALUE, name_val: c.VALUE) callconv(.c) c.VALUE {
+    const file = getFile(self);
+    const archive = file.archive orelse {
+        c.rb_raise(errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .entry))], "archive already closed");
+    };
+    var name_v = name_val;
+    const name = c.rb_string_value_cstr(&name_v);
+    const index = c.zip_name_locate(archive, name, 0);
+    if (index < 0) return c.Qnil;
+    return statEntry(self, file, @intCast(index));
+}
+
+fn getEntryByName(self: c.VALUE, name_val: c.VALUE) callconv(.c) c.VALUE {
+    const found = findEntry(self, name_val);
+    if (found == c.Qnil) {
+        var name_v = name_val;
+        c.rb_raise(
+            errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .not_found))],
+            "entry not found: %s",
+            c.rb_string_value_cstr(&name_v),
+        );
+    }
+    return found;
+}
+
+fn includeEntry(self: c.VALUE, name_val: c.VALUE) callconv(.c) c.VALUE {
+    const file = getFile(self);
+    const archive = file.archive orelse {
+        c.rb_raise(errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .entry))], "archive already closed");
+    };
+    const name_rb = if (c.RTEST(c.rb_obj_is_kind_of(name_val, entry.entry_class)))
+        c.rb_funcall(name_val, c.rb_intern("to_s"), 0)
+    else
+        name_val;
+    var name_v = name_rb;
+    const name = c.rb_string_value_cstr(&name_v);
+    return if (c.zip_name_locate(archive, name, 0) >= 0) c.Qtrue else c.Qfalse;
+}
+
+fn glob(self: c.VALUE, pattern_val: c.VALUE) callconv(.c) c.VALUE {
+    var pattern_v = pattern_val;
+    _ = c.rb_string_value(&pattern_v);
+
+    const list = entries(self);
+    const result = c.rb_ary_new_capa(c.RARRAY_LEN(list));
+
+    const chomp = c.rb_intern("chomp");
+    const fnmatch = c.rb_intern("fnmatch");
+    const slash = c.rb_str_new_cstr("/");
+    const flags = c.INT2NUM(fnm_pathname | fnm_dotmatch | fnm_extglob);
+
+    var i: c_long = 0;
+    while (i < c.RARRAY_LEN(list)) : (i += 1) {
+        const e = c.rb_ary_entry(list, i);
+
+        const name = c.rb_funcall(c.rb_funcall(e, c.rb_intern("to_s"), 0), chomp, 1, slash);
+        if (c.RTEST(c.rb_funcall(c.rb_cFile, fnmatch, 3, pattern_v, name, flags))) {
+            _ = c.rb_ary_push(result, e);
+            if (c.rb_block_given_p() != 0) _ = c.rb_yield(e);
+        }
+    }
+    return result;
+}
+
+fn names(self: c.VALUE) callconv(.c) c.VALUE {
+    const file = getFile(self);
+    const archive = file.archive orelse {
+        c.rb_raise(errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .entry))], "archive already closed");
+    };
+    const num_entries = c.zip_get_num_entries(archive, 0);
+    if (num_entries < 0) errors.raiseCode(c.zip_error_code_zip(c.zip_get_error(archive)));
+
+    const ary = c.rb_ary_new_capa(@intCast(num_entries));
+    var i: c.zip_uint64_t = 0;
+    while (i < @as(c.zip_uint64_t, @intCast(num_entries))) : (i += 1) {
+        const name: [*:0]const u8 = c.zip_get_name(archive, i, 0) orelse "";
+        _ = c.rb_ary_push(ary, c.rb_utf8_str_new_cstr(name));
+    }
+    return ary;
 }
