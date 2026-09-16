@@ -1,5 +1,7 @@
 require "rbconfig"
 
+# The entry point: `require "libzip"`.
+#
 # A precompiled gem ships one extension per Ruby ABI under
 # lib/libzip_ruby/<abi>/, <abi> being the major.minor of the interpreter it was
 # built for (an extension built for 4.0 loads on any 4.0.x).  In a source
@@ -11,4 +13,6 @@ $LOAD_PATH.unshift(precompiled) if File.directory?(precompiled)
 
 require "libzip_ruby"
 
-Zip = LibZip unless defined?(Zip)
+# Everything this gem defines lives under LibZip.  There is deliberately no
+# top-level `Zip` constant: rubyzip owns that name, and defining a second, much
+# smaller `Zip` would hijack any transitive `require "zip"` that resolves to us.

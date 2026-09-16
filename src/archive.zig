@@ -1,6 +1,7 @@
 const std = @import("std");
 const c = @import("c");
 const errors = @import("errors.zig");
+const entry = @import("entry.zig");
 const output_stream = @import("output_stream.zig");
 
 var io_threaded: std.Io.Threaded = undefined;
@@ -218,4 +219,48 @@ fn getOutputStream(self: c.VALUE, name_rb: c.VALUE) callconv(.c) c.VALUE {
     _ = c.rb_string_value_cstr(&name_v);
 
     return output_stream.create(archive, self, name_v);
+}
+
+fn statEntry(self: c.VALUE, file: *File, index: c.zip_uint64_t) c.VALUE {
+    const archive = file.archive orelse return c.Qnil;
+    var stat: c.zip_stat_t = undefined;
+    c.zip_stat_init(&stat);
+    if (c.zip_stat_index(archive, index, 0, &stat) < 0) return c.Qnil;
+    return entry.createEntry(self, index, &stat, isDirectory(archive, index, stat.name));
+}
+
+fn entries(self: c.VALUE) callconv(.c) c.VALUE {
+    const file = getFile(self);
+    const archive = file.archive orelse {
+        c.rb_raise(errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .entry))], "archive already closed");
+    };
+
+    const num_entries = c.zip_get_num_entries(archive, 0);
+    if (num_entries < 0) errors.raiseCode(c.zip_error_code_zip(c.zip_get_error(archive)));
+
+    const ary = c.rb_ary_new_capa(@intCast(num_entries));
+    var i: c.zip_uint64_t = 0;
+    while (i < @as(c.zip_uint64_t, @intCast(num_entries))) : (i += 1) {
+        const obj = statEntry(self, file, i);
+        if (obj != c.Qnil) c.rb_ary_push(ary, obj);
+    }
+    return ary;
+}
+
+fn eachEntry(self: c.VALUE) callconv(.c) c.VALUE {
+    if (c.rb_block_given_p() == 0) return c.rb_enumeratorize(self, c.rb_intern("each_entry"), 0, null);
+    const list = entries(self);
+    var i: c_long = 0;
+    while (i < c.RARRAY_LEN(list)) : (i += 1) c.rb_yield(c.rb_ary_entry(list, i));
+    return list;
+}
+
+fn isDirectory(archive: *c.zip_t, index: c.zip_uint64_t, name: [*c]const u8) bool {
+    const name_bytes = if (name) |n| std.mem.span(n) else return false;
+    if (entry.nameIsDirectory(name_bytes)) return true;
+
+    var opsys: c.zip_uint8_t = 0;
+    var attrs: c.zip_uint32_t = 0;
+    if (c.zip_file_get_external_attributes(archive, index, 0, &opsys, &attrs) < 0) return false;
+    return entry.attributesAreDirectory(opsys, attrs);
 }
