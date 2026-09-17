@@ -52,6 +52,7 @@ pub fn defineClass(libzip: c.VALUE) void {
     c.rb_define_method(file_class, "add", @ptrCast(&addFile), 2);
     c.rb_define_method(file_class, "read", @ptrCast(&readFile), 1);
     c.rb_define_method(file_class, "get_output_stream", @ptrCast(&getOutputStream), 1);
+    c.rb_define_method(file_class, "remove", @ptrCast(&removeFile), 1);
     c.rb_define_method(file_class, "entries", @ptrCast(&entries), 0);
     c.rb_define_method(file_class, "each", @ptrCast(&eachEntry), 0);
     c.rb_define_method(file_class, "each_entry", @ptrCast(&eachEntry), 0);
@@ -291,7 +292,13 @@ fn countEntries(self: c.VALUE) callconv(.c) c.VALUE {
     };
     const num_entries = c.zip_get_num_entries(archive, 0);
     if (num_entries < 0) errors.raiseCode(c.zip_error_code_zip(c.zip_get_error(archive)));
-    return c.ULL2NUM(@intCast(num_entries));
+
+    var active_entries: c.zip_uint64_t = 0;
+    var i: c.zip_uint64_t = 0;
+    while (i < @as(c.zip_uint64_t, @intCast(num_entries))) : (i += 1) {
+        if (c.zip_get_name(archive, i, 0) != null) active_entries += 1;
+    }
+    return c.ULL2NUM(@intCast(active_entries));
 }
 
 fn findEntry(self: c.VALUE, name_val: c.VALUE) callconv(.c) c.VALUE {
@@ -369,8 +376,52 @@ fn names(self: c.VALUE) callconv(.c) c.VALUE {
     const ary = c.rb_ary_new_capa(@intCast(num_entries));
     var i: c.zip_uint64_t = 0;
     while (i < @as(c.zip_uint64_t, @intCast(num_entries))) : (i += 1) {
-        const name: [*:0]const u8 = c.zip_get_name(archive, i, 0) orelse "";
+        const name: [*:0]const u8 = c.zip_get_name(archive, i, 0) orelse continue;
         _ = c.rb_ary_push(ary, c.rb_utf8_str_new_cstr(name));
     }
     return ary;
+}
+
+fn removeFile(self: c.VALUE, name_or_entry: c.VALUE) callconv(.c) c.VALUE {
+    const file = getFile(self);
+    const archive = file.archive orelse {
+        c.rb_raise(errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .entry))], "archive already closed");
+    };
+
+    const is_entry = c.RTEST(c.rb_obj_is_kind_of(name_or_entry, entry.entry_class));
+
+    if (is_entry and entry.getArchive(name_or_entry) != self) {
+        c.rb_raise(
+            errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .invalid_argument))],
+            "entry belongs to a different archive",
+        );
+    }
+
+    const name_rb = if (is_entry)
+        c.rb_funcall(name_or_entry, c.rb_intern("to_s"), 0)
+    else
+        name_or_entry;
+
+    var name_v = name_rb;
+    const name = c.rb_string_value_cstr(&name_v);
+
+    const index = c.zip_name_locate(archive, name, 0);
+    if (index < 0) {
+        c.rb_raise(errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .not_found))], "entry not found: %s", name);
+    }
+
+    const snapshot = statEntry(self, file, @intCast(index));
+    if (snapshot == c.Qnil) {
+        c.rb_raise(
+            errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .not_found))],
+            "entry not found: %s",
+            name,
+        );
+    }
+
+    if (c.zip_delete(archive, @intCast(index)) < 0) {
+        errors.raiseCode(c.zip_error_code_zip(c.zip_get_error(archive)));
+    }
+
+    return snapshot;
 }

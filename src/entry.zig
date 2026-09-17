@@ -154,6 +154,10 @@ fn unixMode(mode: u32) c.zip_uint32_t {
     return @as(c.zip_uint32_t, mode) << 16;
 }
 
+pub fn getArchive(self: c.VALUE) c.VALUE {
+    return getEntry(self).archive_rb;
+}
+
 test "nameIsDirectory: only a trailing slash counts" {
     try std.testing.expect(nameIsDirectory("docs/"));
     try std.testing.expect(nameIsDirectory("a/b/c/"));
