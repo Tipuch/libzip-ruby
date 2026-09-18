@@ -3,6 +3,7 @@ const c = @import("c");
 const errors = @import("errors.zig");
 const entry = @import("entry.zig");
 const output_stream = @import("output_stream.zig");
+const input_stream = @import("input_stream.zig");
 
 var io_threaded: std.Io.Threaded = undefined;
 var io: std.Io = undefined;
@@ -20,24 +21,34 @@ pub fn initIo() void {
 
 const File = struct {
     archive: ?*c.zip_t,
+    input_streams: c.VALUE,
 };
+
+const file_type: c.rb_data_type_t = .{
+    .wrap_struct_name = "LibZip::File",
+    .function = .{ .dmark = markArchive, .dfree = freeArchive, .dsize = null },
+    .data = null,
+    .flags = c.RUBY_TYPED_FREE_IMMEDIATELY,
+};
+
+fn markArchive(archive_ptr: ?*anyopaque) callconv(.c) void {
+    const ptr = archive_ptr orelse return;
+    const file: *File = @ptrCast(@alignCast(ptr));
+
+    c.rb_gc_mark(file.input_streams);
+}
 
 fn freeArchive(archive_ptr: ?*anyopaque) callconv(.c) void {
     const raw = archive_ptr orelse return;
     const file: *File = @ptrCast(@alignCast(raw));
+
+    input_stream.closeAllStreams(file.input_streams);
 
     if (file.archive) |archive| {
         _ = c.zip_discard(archive);
     }
     c.ruby_xfree(file);
 }
-
-const file_type: c.rb_data_type_t = .{
-    .wrap_struct_name = "LibZip::File",
-    .function = .{ .dmark = null, .dfree = freeArchive, .dsize = null },
-    .data = null,
-    .flags = c.RUBY_TYPED_FREE_IMMEDIATELY,
-};
 
 pub var file_class: c.VALUE = undefined;
 
@@ -54,6 +65,7 @@ pub fn defineClass(libzip: c.VALUE) void {
     c.rb_define_method(file_class, "add", @ptrCast(&addFile), 2);
     c.rb_define_method(file_class, "read", @ptrCast(&readFile), 1);
     c.rb_define_method(file_class, "get_output_stream", @ptrCast(&getOutputStream), 1);
+    c.rb_define_method(file_class, "get_input_stream", @ptrCast(&getInputStream), 1);
     c.rb_define_method(file_class, "remove", @ptrCast(&removeFile), 1);
     c.rb_define_method(file_class, "rename", @ptrCast(&renameFile), 2);
     c.rb_define_method(file_class, "entries", @ptrCast(&entries), 0);
@@ -111,7 +123,7 @@ fn openFile(argc: c_int, argv: [*c]c.VALUE, klass: c.VALUE) callconv(.c) c.VALUE
     const archive = maybe_archive.?;
 
     const file: *File = @ptrCast(@alignCast(c.ruby_xmalloc(@sizeOf(File))));
-    file.* = .{ .archive = archive };
+    file.* = .{ .archive = archive, .input_streams = c.rb_ary_new() };
     const obj = c.TypedData_Wrap_Struct(file_class, &file_type, file);
 
     if (c.rb_block_given_p() != 0) {
@@ -129,6 +141,9 @@ fn openBody(obj: c.VALUE) callconv(.c) c.VALUE {
 
 fn openEnsure(obj: c.VALUE) callconv(.c) c.VALUE {
     const file = getFile(obj);
+
+    input_stream.closeAllStreams(file.input_streams);
+
     if (file.archive) |archive| {
         _ = c.zip_discard(archive);
         file.archive = null;
@@ -148,6 +163,9 @@ fn closeFile(self: c.VALUE) callconv(.c) c.VALUE {
 
 fn closeFileLibzip(file: *File) void {
     const archive = file.archive orelse return;
+
+    input_stream.closeAllStreams(file.input_streams);
+
     if (c.zip_close(archive) < 0) {
         const zip_error = c.zip_get_error(archive);
         const zip_exit_code = c.zip_error_code_zip(zip_error);
@@ -233,6 +251,25 @@ fn readFile(self: c.VALUE, name_val: c.VALUE) callconv(.c) c.VALUE {
     }
 
     return result;
+}
+
+fn getInputStream(self: c.VALUE, name_val: c.VALUE) callconv(.c) c.VALUE {
+    const file = getFile(self);
+    const archive = file.archive orelse {
+        c.rb_raise(errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .entry))], "archive already closed");
+    };
+
+    var name_rb = name_val;
+    const name = c.rb_string_value_cstr(&name_rb);
+
+    var stat: c.zip_stat_t = undefined;
+    c.zip_stat_init(&stat);
+
+    if (c.zip_stat(archive, name, 0, &stat) < 0) {
+        errors.raiseCode(c.zip_error_code_zip(c.zip_get_error(archive)));
+    }
+
+    return input_stream.create(archive, self, file.input_streams, name, stat.size);
 }
 
 fn getOutputStream(self: c.VALUE, name_rb: c.VALUE) callconv(.c) c.VALUE {

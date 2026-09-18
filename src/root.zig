@@ -5,6 +5,7 @@ const errors = @import("errors.zig");
 const archive = @import("archive.zig");
 const entry = @import("entry.zig");
 const output_stream = @import("output_stream.zig");
+const input_stream = @import("input_stream.zig");
 
 // Stamped by build.zig from libzip-ruby.gemspec, the single source of truth
 // for the version, so LibZip::VERSION and the released .gem agree by
@@ -20,6 +21,7 @@ export fn Init_libzip_ruby() void {
     entry.defineClass(libzip);
     archive.defineClass(libzip);
     output_stream.defineClass(libzip);
+    input_stream.defineClass(libzip);
     const version = c.rb_str_new_cstr(VERSION);
     c.rb_define_const(libzip, "VERSION", version);
 }
