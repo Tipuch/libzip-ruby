@@ -262,6 +262,27 @@ zip.glob("**/*.rb") { |entry| entry.name }   # also yields each match
 Matching is case-sensitive on every platform, unlike `Dir.glob` on macOS.
 `*`, `?`, `[...]` and `{a,b}` all work; `**` matches zero or more directories.
 
+### Deleting entries
+
+```ruby
+removed = zip.remove("old.txt")
+removed = zip.remove(entry)          # an Entry works too
+removed.name                          # => "old.txt"
+removed.size                          # still readable after zip.close
+```
+
+`remove` returns the entry that went away — a snapshot taken before the
+deletion, so its metadata stays readable afterwards. If the name is not in the
+archive it raises `LibZip::NotFoundError`, and so does a second `remove` of the
+same name. There is no third outcome: you get the entry back, or you get an
+exception.
+
+Like `add`, removal is marked immediately and written when the archive is
+closed — closing commits, there is no `discard`. Inside the block form, a block
+that raises leaves the archive on disk untouched. Removing the only remaining
+entry leaves an empty archive, and libzip refuses to write those: the file is
+removed from disk instead of being rewritten with an empty directory.
+
 ### Overwriting
 
 `add` and `get_output_stream` both pass `ZIP_FL_OVERWRITE`, so writing the same

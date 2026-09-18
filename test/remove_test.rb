@@ -9,8 +9,7 @@ require "zlib"
 # closed. A name that is not present raises LibZip::NotFoundError.
 #
 # The archive is always built with LibZip::File itself, except where the test is
-# specifically about a foreign tool's archive (the fixture).
-FIXTURE = File.expand_path("fixtures/entries.zip", __dir__)
+# specifically about a foreign tool's archive (ENTRIES_ZIP, defined in helper.rb).
 
 class RemoveTest < Minitest::Test
   def setup
@@ -183,7 +182,7 @@ class RemoveTest < Minitest::Test
 
   def test_removing_a_directory_entry
     foreign = File.join(@dir, "foreign.zip")
-    FileUtils.cp(FIXTURE, foreign)
+    FileUtils.cp(ENTRIES_ZIP, foreign)
 
     LibZip::File.open(foreign) do |zip|
       removed = zip.remove("docs/")
@@ -217,6 +216,20 @@ class RemoveTest < Minitest::Test
     LibZip::File.open(@zip_path, create: true) { |_zip| }
 
     assert_equal before, File.binread(@zip_path)
+  end
+
+  def test_close_writes_a_smaller_central_directory
+    # Every other assertion here reads the archive back through our own
+    # binding, which would happily agree with a bug. This one reads the bytes on
+    # disk: a zip ends with an End Of Central Directory record, "PK\x05\x06"
+    # followed by the entry count as a little-endian u16 at offset 10.
+    LibZip::File.open(@zip_path) { |zip| zip.remove("a.txt") }
+
+    bytes = File.binread(@zip_path)
+    eocd = bytes.rindex("PK\x05\x06")
+
+    refute_nil eocd, "no end-of-central-directory record in the written archive"
+    assert_equal 2, bytes.byteslice(eocd + 10, 2).unpack1("v")
   end
 
   def test_remove_after_close_raises_entry_error

@@ -2,15 +2,10 @@ require_relative "helper"
 require "tmpdir"
 require "zlib"
 
-# test/fixtures/entries.zip was written by python3's zipfile, not by us: a
-# UNIX-created archive with a real 0o40755 external attribute on `docs/` and a
-# UTF-8 name. Our own writer cannot produce either, so the fixture is the only
-# way to exercise entries that came from a foreign tool.
-#
 # The Ruby-level tests cannot tell *which* rule decided `directory?` (the
 # trailing-slash rule fires first on `docs/`). The per-rule coverage lives in
 # the Zig unit tests for nameIsDirectory / attributesAreDirectory.
-FIXTURE = File.expand_path("fixtures/entries.zip", __dir__)
+# ENTRIES_ZIP itself is defined in helper.rb.
 
 class EntryTest < Minitest::Test
   NAMES = ["b.txt", "app.rb", "café.txt", "docs/", "docs/a.txt"].freeze
@@ -20,7 +15,7 @@ class EntryTest < Minitest::Test
     @zip_path = File.join(@dir, "test.zip")
     @src = File.join(@dir, "src.txt")
     File.write(@src, "hello\n")
-    @zip = LibZip::File.open(FIXTURE)
+    @zip = LibZip::File.open(ENTRIES_ZIP)
   end
 
   def teardown
