@@ -1,5 +1,6 @@
 const std = @import("std");
 const c = @import("c");
+const errors = @import("errors.zig");
 
 pub const Entry = struct {
     archive_rb: c.VALUE,
@@ -46,15 +47,28 @@ fn freeEntry(raw: ?*anyopaque) callconv(.c) void {
     c.ruby_xfree(raw.?);
 }
 
-pub fn createEntry(archive_rb: c.VALUE, index: c.zip_uint64_t, stat: *const c.zip_stat_t, is_dir: bool) c.VALUE {
+pub fn createEntry(archive_rb: c.VALUE, archive: *c.zip_t, index: c.zip_uint64_t, stat: *const c.zip_stat_t, is_dir: bool) c.VALUE {
     const name: [*:0]const u8 = stat.name orelse "";
+
+    var comment_length: c.zip_uint32_t = 0;
+    const comment_ptr = c.zip_file_get_comment(
+        archive,
+        index,
+        &comment_length,
+        c.ZIP_FL_ENC_RAW,
+    ) orelse {
+        errors.raiseCode(
+            c.zip_error_code_zip(c.zip_get_error(archive)),
+        );
+    };
+    const comment_rb = convertComment(comment_ptr, comment_length);
     const entry: *Entry = @ptrCast(@alignCast(c.ruby_xmalloc(@sizeOf(Entry))));
     entry.* = .{
         .archive_rb = archive_rb,
         .index = index,
         .name_rb = c.rb_utf8_str_new_cstr(name),
         .valid = stat.valid,
-        .comment_rb = c.Qnil,
+        .comment_rb = comment_rb,
         .size = stat.size,
         .comp_size = stat.comp_size,
         .crc = stat.crc,
@@ -87,6 +101,7 @@ pub fn defineClass(libzip: c.VALUE) void {
 
     c.rb_define_method(entry_class, "name", @ptrCast(&entryName), 0);
     c.rb_define_method(entry_class, "index", @ptrCast(&entryIndex), 0);
+    c.rb_define_method(entry_class, "comment", @ptrCast(&entryComment), 0);
     c.rb_define_method(entry_class, "size", @ptrCast(&entrySize), 0);
     c.rb_define_method(entry_class, "compressed_size", @ptrCast(&entryCompressedSize), 0);
     c.rb_define_method(entry_class, "crc", @ptrCast(&entryCrc), 0);
@@ -145,6 +160,10 @@ fn entryToS(self: c.VALUE) callconv(.c) c.VALUE {
     return getEntry(self).name_rb;
 }
 
+fn entryComment(self: c.VALUE) callconv(.c) c.VALUE {
+    return getEntry(self).comment_rb;
+}
+
 fn inspectEntry(self: c.VALUE) callconv(.c) c.VALUE {
     const entry = getEntry(self);
     return c.rb_sprintf("#<LibZip::Entry name=%s size=%llu>", c.RSTRING_PTR(c.rb_inspect(entry.name_rb)), entry.size);
@@ -156,6 +175,22 @@ fn unixMode(mode: u32) c.zip_uint32_t {
 
 pub fn getArchive(self: c.VALUE) c.VALUE {
     return getEntry(self).archive_rb;
+}
+
+fn convertComment(ptr: [*c]const u8, length: c.zip_uint32_t) c.VALUE {
+    if (length == 0) return c.Qnil;
+
+    const result = c.rb_str_new(ptr, @intCast(length));
+    const utf8 = c.rb_enc_find_index("UTF-8");
+    const binary = c.rb_enc_find_index("ASCII-8BIT");
+
+    _ = c.rb_enc_associate_index(result, utf8);
+
+    if (c.rb_enc_str_coderange(result) == c.RUBY_ENC_CODERANGE_BROKEN) {
+        _ = c.rb_enc_associate_index(result, binary);
+    }
+
+    return result;
 }
 
 test "nameIsDirectory: only a trailing slash counts" {

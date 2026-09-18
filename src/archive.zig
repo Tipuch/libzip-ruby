@@ -7,6 +7,8 @@ const output_stream = @import("output_stream.zig");
 var io_threaded: std.Io.Threaded = undefined;
 var io: std.Io = undefined;
 
+const MAX_COMMENT_LENGTH: u32 = 65_535;
+
 var fnm_pathname: c_int = 0;
 var fnm_dotmatch: c_int = 0;
 var fnm_extglob: c_int = 0;
@@ -63,6 +65,9 @@ pub fn defineClass(libzip: c.VALUE) void {
     c.rb_define_method(file_class, "include?", @ptrCast(&includeEntry), 1);
     c.rb_define_method(file_class, "find_entry", @ptrCast(&findEntry), 1);
     c.rb_define_method(file_class, "get_entry", @ptrCast(&getEntryByName), 1);
+    c.rb_define_method(file_class, "comment", @ptrCast(&getComment), 0);
+    c.rb_define_method(file_class, "comment=", @ptrCast(&setComment), 1);
+    c.rb_define_method(file_class, "set_comment", @ptrCast(&setEntryComment), 2);
     c.rb_define_method(file_class, "[]", @ptrCast(&findEntry), 1);
     c.rb_define_method(file_class, "glob", @ptrCast(&glob), 1);
 }
@@ -247,7 +252,7 @@ fn statEntry(self: c.VALUE, file: *File, index: c.zip_uint64_t) c.VALUE {
     var stat: c.zip_stat_t = undefined;
     c.zip_stat_init(&stat);
     if (c.zip_stat_index(archive, index, 0, &stat) < 0) return c.Qnil;
-    return entry.createEntry(self, index, &stat, isDirectory(archive, index, stat.name));
+    return entry.createEntry(self, archive, index, &stat, isDirectory(archive, index, stat.name));
 }
 
 fn entries(self: c.VALUE) callconv(.c) c.VALUE {
@@ -475,4 +480,132 @@ fn renameFile(self: c.VALUE, name_or_entry: c.VALUE, new_name_val: c.VALUE) call
         );
     }
     return snapshot;
+}
+
+fn getComment(self: c.VALUE) callconv(.c) c.VALUE {
+    const file = getFile(self);
+    const archive = file.archive orelse {
+        c.rb_raise(
+            errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .entry))],
+            "archive already closed",
+        );
+    };
+
+    var length: c_int = 0;
+    const ptr = c.zip_get_archive_comment(archive, &length, c.ZIP_FL_ENC_RAW);
+    if (ptr == null) {
+        errors.raiseCode(c.zip_error_code_zip(c.zip_get_error(archive)));
+    }
+
+    if (length == 0) return c.Qnil;
+
+    const result = c.rb_str_new(ptr, @intCast(length));
+    const utf8 = c.rb_enc_find_index("UTF-8");
+    const binary = c.rb_enc_find_index("ASCII-8BIT");
+
+    _ = c.rb_enc_associate_index(result, utf8);
+
+    if (c.rb_enc_str_coderange(result) == c.RUBY_ENC_CODERANGE_BROKEN) {
+        _ = c.rb_enc_associate_index(result, binary);
+    }
+
+    return result;
+}
+
+fn setComment(self: c.VALUE, value: c.VALUE) callconv(.c) c.VALUE {
+    const file = getFile(self);
+    const archive = file.archive orelse {
+        c.rb_raise(
+            errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .entry))],
+            "archive already closed",
+        );
+    };
+
+    if (value == c.Qnil) {
+        if (c.zip_set_archive_comment(archive, null, 0) < 0) {
+            errors.raiseCode(c.zip_error_code_zip(c.zip_get_error(archive)));
+        }
+        return value;
+    }
+
+    var comment = value;
+    _ = c.rb_string_value(&comment);
+
+    const length: u32 = @intCast(c.RSTRING_LEN(comment));
+    if (length > MAX_COMMENT_LENGTH) {
+        c.rb_raise(
+            errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .invalid_argument))],
+            "comment is too long: maximum is %i bytes",
+            MAX_COMMENT_LENGTH,
+        );
+    }
+
+    const ptr = c.RSTRING_PTR(comment);
+
+    if (c.zip_set_archive_comment(archive, ptr, @intCast(length)) < 0) {
+        errors.raiseCode(c.zip_error_code_zip(c.zip_get_error(archive)));
+    }
+
+    return value;
+}
+
+fn setEntryComment(
+    self: c.VALUE,
+    name_val: c.VALUE,
+    comment_val: c.VALUE,
+) callconv(.c) c.VALUE {
+    const file = getFile(self);
+    const archive = file.archive orelse {
+        c.rb_raise(
+            errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .entry))],
+            "archive already closed",
+        );
+    };
+
+    var name_v = name_val;
+    const name = c.rb_string_value_cstr(&name_v);
+
+    const index = c.zip_name_locate(archive, name, 0);
+    if (index < 0) {
+        c.rb_raise(
+            errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .not_found))],
+            "entry not found: %s",
+            name,
+        );
+    }
+
+    var comment_v = comment_val;
+    var comment_ptr: [*c]const u8 = null;
+    var comment_len: c.zip_uint16_t = 0;
+    var flags: c.zip_flags_t = c.ZIP_FL_ENC_GUESS;
+
+    if (comment_val != c.Qnil) {
+        _ = c.rb_string_value(&comment_v);
+
+        const length: u32 = @intCast(c.RSTRING_LEN(comment_v));
+        if (length > MAX_COMMENT_LENGTH) {
+            c.rb_raise(
+                errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .invalid_argument))],
+                "comment is too long: maximum is %i bytes",
+                MAX_COMMENT_LENGTH,
+            );
+        }
+
+        comment_ptr = c.RSTRING_PTR(comment_v);
+        comment_len = @intCast(length);
+
+        const encoding = c.rb_enc_get_index(comment_v);
+        const utf8 = c.rb_enc_find_index("UTF-8");
+        const valid = c.rb_enc_str_coderange(comment_v) != c.RUBY_ENC_CODERANGE_BROKEN;
+
+        if (encoding == utf8 and valid) {
+            flags = c.ZIP_FL_ENC_UTF_8;
+        }
+    }
+
+    if (c.zip_file_set_comment(archive, @intCast(index), comment_ptr, comment_len, flags) < 0) {
+        errors.raiseCode(c.zip_error_code_zip(c.zip_get_error(archive)));
+    }
+
+    return self;
 }
