@@ -138,6 +138,7 @@ class Packager
       end
       FileUtils.rm_rf stash
       FileUtils.cp File.join(ROOT, GEMSPEC), root
+      FileUtils.cp File.join(ROOT, "LICENSE"), root
 
       say "gem #{platform}  (#{abis.size} abi: #{abis.join(', ')})"
       # The gemspec globs `lib/**/*` relative to its own directory, so `gem
