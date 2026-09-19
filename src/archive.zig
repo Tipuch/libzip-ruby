@@ -56,9 +56,9 @@ pub fn defineClass(libzip: c.VALUE) void {
     c.rb_define_method(file_class, "closed?", @ptrCast(&fileClosed), 0);
     c.rb_define_method(file_class, "close", @ptrCast(&closeFile), 0);
     c.rb_define_singleton_method(file_class, "open", @ptrCast(&openFile), -1);
-    c.rb_define_method(file_class, "add", @ptrCast(&addFile), 2);
+    c.rb_define_method(file_class, "add", @ptrCast(&addFile), -1);
     c.rb_define_method(file_class, "read", @ptrCast(&readFile), -1);
-    c.rb_define_method(file_class, "get_output_stream", @ptrCast(&getOutputStream), 1);
+    c.rb_define_method(file_class, "get_output_stream", @ptrCast(&getOutputStream), -1);
     c.rb_define_method(file_class, "get_input_stream", @ptrCast(&getInputStream), -1);
     c.rb_define_method(file_class, "remove", @ptrCast(&removeFile), 1);
     c.rb_define_method(file_class, "rename", @ptrCast(&renameFile), 2);
@@ -74,6 +74,7 @@ pub fn defineClass(libzip: c.VALUE) void {
     c.rb_define_method(file_class, "comment", @ptrCast(&getComment), 0);
     c.rb_define_method(file_class, "comment=", @ptrCast(&setComment), 1);
     c.rb_define_method(file_class, "set_comment", @ptrCast(&setEntryComment), 2);
+    c.rb_define_method(file_class, "password=", @ptrCast(&setPassword), 1);
     c.rb_define_method(file_class, "[]", @ptrCast(&findEntry), 1);
     c.rb_define_method(file_class, "glob", @ptrCast(&glob), 1);
 }
@@ -183,14 +184,18 @@ fn closeFileLibzip(file: *File) void {
     file.archive = null;
 }
 
-fn addFile(self: c.VALUE, name_val: c.VALUE, src_val: c.VALUE) callconv(.c) c.VALUE {
+fn addFile(argc: c_int, argv: [*c]c.VALUE, self: c.VALUE) callconv(.c) c.VALUE {
     const file = getFile(self);
     const archive = file.archive orelse {
         c.rb_raise(errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .entry))], "archive already closed");
     };
+    if (argc < 2 or argc > 3) {
+        c.rb_error_arity(argc, 2, 3);
+    }
+    const encryption_config = encryption.parse(encryption.optionsHash(argc, argv, 2), .write);
 
-    var name_v = name_val;
-    var src_v = src_val;
+    var name_v = argv[0];
+    var src_v = argv[1];
     const name = c.rb_string_value_cstr(&name_v);
     const src = c.rb_string_value_cstr(&src_v);
 
@@ -220,11 +225,18 @@ fn addFile(self: c.VALUE, name_val: c.VALUE, src_val: c.VALUE) callconv(.c) c.VA
         errors.raiseCode(zip_exit_code);
     }
 
-    if (c.zip_file_add(archive, name, zip_src, c.ZIP_FL_OVERWRITE) < 0) {
+    const index = c.zip_file_add(archive, name, zip_src, c.ZIP_FL_OVERWRITE);
+    if (index < 0) {
         const zip_error = c.zip_get_error(archive);
         const zip_exit_code = c.zip_error_code_zip(zip_error);
         c.zip_source_free(zip_src);
         file.archive = null;
+        errors.raiseCode(zip_exit_code);
+    }
+
+    if (encryption_config.method != .none and c.zip_file_set_encryption(archive, @intCast(index), encryption.methodVal(&encryption_config), encryption.passwordPtr(&encryption_config)) < 0) {
+        const zip_exit_code = c.zip_error_code_zip(c.zip_get_error(archive));
+        _ = c.zip_delete(archive, @intCast(index));
         errors.raiseCode(zip_exit_code);
     }
 
@@ -241,7 +253,7 @@ fn readFile(argc: c_int, argv: [*c]c.VALUE, self: c.VALUE) callconv(.c) c.VALUE 
         c.rb_error_arity(argc, 1, 2);
     }
     const opts = encryption.optionsHash(argc, argv, 1);
-    const config = encryption.parse(opts, .read);
+    const encryption_config = encryption.parse(opts, .read);
 
     var name_rb = argv[0];
     const name = c.rb_string_value_cstr(&name_rb);
@@ -252,14 +264,14 @@ fn readFile(argc: c_int, argv: [*c]c.VALUE, self: c.VALUE) callconv(.c) c.VALUE 
     }
 
     const maybe_file =
-        if (config.password_rb == c.Qnil)
+        if (encryption_config.password_rb == c.Qnil)
             c.zip_fopen(archive, name, 0)
         else
             c.zip_fopen_encrypted(
                 archive,
                 name,
                 0,
-                encryption.passwordPtr(&config),
+                encryption.passwordPtr(&encryption_config),
             );
 
     if (maybe_file == null) {
@@ -297,7 +309,7 @@ fn getInputStream(argc: c_int, argv: [*c]c.VALUE, self: c.VALUE) callconv(.c) c.
         c.rb_error_arity(argc, 1, 2);
     }
     const options = encryption.optionsHash(argc, argv, 1);
-    const config = encryption.parse(options, .read);
+    const encryption_config = encryption.parse(options, .read);
 
     var name_rb = argv[0];
     const name = c.rb_string_value_cstr(&name_rb);
@@ -309,19 +321,24 @@ fn getInputStream(argc: c_int, argv: [*c]c.VALUE, self: c.VALUE) callconv(.c) c.
         errors.raiseCode(c.zip_error_code_zip(c.zip_get_error(archive)));
     }
 
-    return input_stream.create(archive, self, &file.input_streams, name, stat.size, &config);
+    return input_stream.create(archive, self, &file.input_streams, name, stat.size, &encryption_config);
 }
 
-fn getOutputStream(self: c.VALUE, name_rb: c.VALUE) callconv(.c) c.VALUE {
+fn getOutputStream(argc: c_int, argv: [*c]c.VALUE, self: c.VALUE) callconv(.c) c.VALUE {
     const file = getFile(self);
     const archive = file.archive orelse {
         c.rb_raise(errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .entry))], "archive already closed");
     };
 
-    var name_v = name_rb;
+    if (argc < 1 or argc > 2) {
+        c.rb_error_arity(argc, 1, 2);
+    }
+    const encryption_config = encryption.parse(encryption.optionsHash(argc, argv, 1), .write);
+
+    var name_v = argv[0];
     _ = c.rb_string_value_cstr(&name_v);
 
-    return output_stream.create(archive, self, name_v);
+    return output_stream.create(archive, self, name_v, &encryption_config);
 }
 
 fn statEntry(self: c.VALUE, file: *File, index: c.zip_uint64_t) c.VALUE {
@@ -685,4 +702,22 @@ fn setEntryComment(
     }
 
     return self;
+}
+
+fn setPassword(self: c.VALUE, password_rb: c.VALUE) callconv(.c) c.VALUE {
+    const file = getFile(self);
+    const archive = file.archive orelse {
+        c.rb_raise(errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .entry))], "archive already closed");
+    };
+
+    const password = if (password_rb == c.Qnil) null else blk: {
+        var string = password_rb;
+        break :blk c.rb_string_value_cstr(&string);
+    };
+
+    if (c.zip_set_default_password(archive, password) < 0) {
+        errors.raiseCode(c.zip_error_code_zip(c.zip_get_error(archive)));
+    }
+
+    return password_rb;
 }

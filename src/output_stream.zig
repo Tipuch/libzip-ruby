@@ -1,13 +1,16 @@
 const std = @import("std");
 const c = @import("c");
 const errors = @import("errors.zig");
+const encryption = @import("encryption.zig");
 
 pub const OutputStream = struct {
     archive_rb: c.VALUE,
     name_rb: c.VALUE,
+    password_rb: c.VALUE,
     archive: ?*c.zip_t,
     buffer: []u8,
     committed: bool,
+    encryption_method: encryption.Method,
 };
 
 fn markStream(ptr: ?*anyopaque) callconv(.c) void {
@@ -15,6 +18,7 @@ fn markStream(ptr: ?*anyopaque) callconv(.c) void {
     const stream: *OutputStream = @ptrCast(@alignCast(raw));
     c.rb_gc_mark(stream.archive_rb);
     c.rb_gc_mark(stream.name_rb);
+    c.rb_gc_mark(stream.password_rb);
 }
 
 fn freeStream(ptr: ?*anyopaque) callconv(.c) void {
@@ -35,14 +39,16 @@ const stream_type: c.rb_data_type_t = .{
 
 pub var stream_class: c.VALUE = undefined;
 
-pub fn create(archive: ?*c.zip_t, archive_rb: c.VALUE, name_rb: c.VALUE) c.VALUE {
+pub fn create(archive: ?*c.zip_t, archive_rb: c.VALUE, name_rb: c.VALUE, config: *const encryption.Config) c.VALUE {
     const stream: *OutputStream = @ptrCast(@alignCast(c.ruby_xmalloc(@sizeOf(OutputStream))));
     stream.* = .{
         .archive_rb = archive_rb,
         .name_rb = name_rb,
+        .password_rb = config.password_rb,
         .archive = archive,
         .buffer = &.{},
         .committed = false,
+        .encryption_method = config.method,
     };
     const obj = c.TypedData_Wrap_Struct(stream_class, &stream_type, stream);
     if (c.rb_block_given_p() != 0) {
@@ -75,9 +81,21 @@ fn commitStream(stream: *OutputStream) void {
     }
     stream.committed = true;
 
-    if (c.zip_file_add(archive, name, source, c.ZIP_FL_OVERWRITE) < 0) {
+    const index = c.zip_file_add(archive, name, source, c.ZIP_FL_OVERWRITE);
+    if (index < 0) {
         c.zip_source_free(source);
         errors.raiseCode(c.zip_error_code_zip(c.zip_get_error(archive)));
+    }
+
+    if (stream.encryption_method != .none) {
+        var password = stream.password_rb;
+        const password_ptr = if (password == c.Qnil) null else c.rb_string_value_cstr(&password);
+
+        if (c.zip_file_set_encryption(archive, @intCast(index), @backingInt(@as(encryption.Method, stream.encryption_method)), password_ptr) < 0) {
+            const zip_error_code = c.zip_error_code_zip(c.zip_get_error(archive));
+            _ = c.zip_delete(archive, @intCast(index));
+            errors.raiseCode(zip_error_code);
+        }
     }
 }
 
