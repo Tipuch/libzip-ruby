@@ -4,6 +4,7 @@ const errors = @import("errors.zig");
 const entry = @import("entry.zig");
 const output_stream = @import("output_stream.zig");
 const input_stream = @import("input_stream.zig");
+const encryption = @import("encryption.zig");
 
 var io_threaded: std.Io.Threaded = undefined;
 var io: std.Io = undefined;
@@ -21,28 +22,21 @@ pub fn initIo() void {
 
 const File = struct {
     archive: ?*c.zip_t,
-    input_streams: c.VALUE,
+    input_streams: ?*input_stream.InputStream,
 };
 
 const file_type: c.rb_data_type_t = .{
     .wrap_struct_name = "LibZip::File",
-    .function = .{ .dmark = markArchive, .dfree = freeArchive, .dsize = null },
+    .function = .{ .dmark = null, .dfree = freeArchive, .dsize = null },
     .data = null,
     .flags = c.RUBY_TYPED_FREE_IMMEDIATELY,
 };
-
-fn markArchive(archive_ptr: ?*anyopaque) callconv(.c) void {
-    const ptr = archive_ptr orelse return;
-    const file: *File = @ptrCast(@alignCast(ptr));
-
-    c.rb_gc_mark(file.input_streams);
-}
 
 fn freeArchive(archive_ptr: ?*anyopaque) callconv(.c) void {
     const raw = archive_ptr orelse return;
     const file: *File = @ptrCast(@alignCast(raw));
 
-    input_stream.closeAllStreams(file.input_streams);
+    input_stream.closeAllStreams(&file.input_streams);
 
     if (file.archive) |archive| {
         _ = c.zip_discard(archive);
@@ -63,9 +57,9 @@ pub fn defineClass(libzip: c.VALUE) void {
     c.rb_define_method(file_class, "close", @ptrCast(&closeFile), 0);
     c.rb_define_singleton_method(file_class, "open", @ptrCast(&openFile), -1);
     c.rb_define_method(file_class, "add", @ptrCast(&addFile), 2);
-    c.rb_define_method(file_class, "read", @ptrCast(&readFile), 1);
+    c.rb_define_method(file_class, "read", @ptrCast(&readFile), -1);
     c.rb_define_method(file_class, "get_output_stream", @ptrCast(&getOutputStream), 1);
-    c.rb_define_method(file_class, "get_input_stream", @ptrCast(&getInputStream), 1);
+    c.rb_define_method(file_class, "get_input_stream", @ptrCast(&getInputStream), -1);
     c.rb_define_method(file_class, "remove", @ptrCast(&removeFile), 1);
     c.rb_define_method(file_class, "rename", @ptrCast(&renameFile), 2);
     c.rb_define_method(file_class, "entries", @ptrCast(&entries), 0);
@@ -100,8 +94,9 @@ fn openFile(argc: c_int, argv: [*c]c.VALUE, klass: c.VALUE) callconv(.c) c.VALUE
     const path = c.rb_string_value_cstr(&path_val);
 
     var flags: c_int = 0;
+    var opts: c.VALUE = c.Qnil;
     if (argc > 1) {
-        const opts = argv[1];
+        opts = argv[1];
         if (!c.RB_TYPE_P(opts, c.RUBY_T_HASH)) {
             c.rb_raise(c.rb_eTypeError, "no implicit conversion of String into Hash");
         }
@@ -120,10 +115,22 @@ fn openFile(argc: c_int, argv: [*c]c.VALUE, klass: c.VALUE) callconv(.c) c.VALUE
         errors.raiseCode(zip_exit_code);
     }
 
+    const password_value = if (opts == c.Qnil) c.Qnil else c.rb_hash_lookup2(opts, c.ID2SYM(c.rb_intern("password")), c.Qnil);
+
     const archive = maybe_archive.?;
+    if (password_value != c.Qnil) {
+        var password = password_value;
+        _ = c.rb_string_value(&password);
+
+        if (c.zip_set_default_password(archive, c.rb_string_value_cstr(&password)) < 0) {
+            const error_code = c.zip_error_code_zip(c.zip_get_error(archive));
+            _ = c.zip_discard(archive);
+            errors.raiseCode(error_code);
+        }
+    }
 
     const file: *File = @ptrCast(@alignCast(c.ruby_xmalloc(@sizeOf(File))));
-    file.* = .{ .archive = archive, .input_streams = c.rb_ary_new() };
+    file.* = .{ .archive = archive, .input_streams = null };
     const obj = c.TypedData_Wrap_Struct(file_class, &file_type, file);
 
     if (c.rb_block_given_p() != 0) {
@@ -142,7 +149,7 @@ fn openBody(obj: c.VALUE) callconv(.c) c.VALUE {
 fn openEnsure(obj: c.VALUE) callconv(.c) c.VALUE {
     const file = getFile(obj);
 
-    input_stream.closeAllStreams(file.input_streams);
+    input_stream.closeAllStreams(&file.input_streams);
 
     if (file.archive) |archive| {
         _ = c.zip_discard(archive);
@@ -164,7 +171,7 @@ fn closeFile(self: c.VALUE) callconv(.c) c.VALUE {
 fn closeFileLibzip(file: *File) void {
     const archive = file.archive orelse return;
 
-    input_stream.closeAllStreams(file.input_streams);
+    input_stream.closeAllStreams(&file.input_streams);
 
     if (c.zip_close(archive) < 0) {
         const zip_error = c.zip_get_error(archive);
@@ -224,42 +231,75 @@ fn addFile(self: c.VALUE, name_val: c.VALUE, src_val: c.VALUE) callconv(.c) c.VA
     return self;
 }
 
-fn readFile(self: c.VALUE, name_val: c.VALUE) callconv(.c) c.VALUE {
+fn readFile(argc: c_int, argv: [*c]c.VALUE, self: c.VALUE) callconv(.c) c.VALUE {
     const file = getFile(self);
     const archive = file.archive orelse {
         c.rb_raise(errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .entry))], "archive already closed");
     };
 
-    var name_v = name_val;
-    const name = c.rb_string_value_cstr(&name_v);
+    if (argc < 1 or argc > 2) {
+        c.rb_error_arity(argc, 1, 2);
+    }
+    const opts = encryption.optionsHash(argc, argv, 1);
+    const config = encryption.parse(opts, .read);
+
+    var name_rb = argv[0];
+    const name = c.rb_string_value_cstr(&name_rb);
 
     var stat: c.zip_stat_t = undefined;
     if (c.zip_stat(archive, name, 0, &stat) < 0) {
         errors.raiseCode(c.zip_error_code_zip(c.zip_get_error(archive)));
     }
 
-    const zip_file = c.zip_fopen(archive, name, 0) orelse {
-        errors.raiseCode(c.zip_error_code_zip(c.zip_get_error(archive)));
-    };
+    const maybe_file =
+        if (config.password_rb == c.Qnil)
+            c.zip_fopen(archive, name, 0)
+        else
+            c.zip_fopen_encrypted(
+                archive,
+                name,
+                0,
+                encryption.passwordPtr(&config),
+            );
+
+    if (maybe_file == null) {
+        errors.raiseCode(
+            c.zip_error_code_zip(c.zip_get_error(archive)),
+        );
+    }
+
+    const zip_file = maybe_file;
 
     const result = c.rb_str_new(null, @intCast(stat.size));
     const read_exit_code = c.zip_fread(zip_file, c.RSTRING_PTR(result), stat.size);
+    var trailing: [1]u8 = undefined;
+    const verify_exit_code = c.zip_fread(zip_file, @ptrCast(&trailing), 1);
+    const error_code = c.zip_error_code_zip(c.zip_file_get_error(zip_file));
     _ = c.zip_fclose(zip_file);
-
     if (read_exit_code < 0 or @as(u64, @intCast(read_exit_code)) != stat.size) {
-        errors.raiseCode(c.zip_error_code_zip(c.zip_get_error(archive)));
+        errors.raiseCode(error_code);
+    }
+
+    if (verify_exit_code != 0) {
+        errors.raiseCode(if (verify_exit_code < 0) error_code else c.ZIP_ER_INCONS);
     }
 
     return result;
 }
 
-fn getInputStream(self: c.VALUE, name_val: c.VALUE) callconv(.c) c.VALUE {
+fn getInputStream(argc: c_int, argv: [*c]c.VALUE, self: c.VALUE) callconv(.c) c.VALUE {
     const file = getFile(self);
     const archive = file.archive orelse {
         c.rb_raise(errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .entry))], "archive already closed");
     };
 
-    var name_rb = name_val;
+    if (argc < 1 or argc > 2) {
+        c.rb_error_arity(argc, 1, 2);
+    }
+    const options = encryption.optionsHash(argc, argv, 1);
+    const config = encryption.parse(options, .read);
+
+    var name_rb = argv[0];
     const name = c.rb_string_value_cstr(&name_rb);
 
     var stat: c.zip_stat_t = undefined;
@@ -269,7 +309,7 @@ fn getInputStream(self: c.VALUE, name_val: c.VALUE) callconv(.c) c.VALUE {
         errors.raiseCode(c.zip_error_code_zip(c.zip_get_error(archive)));
     }
 
-    return input_stream.create(archive, self, file.input_streams, name, stat.size);
+    return input_stream.create(archive, self, &file.input_streams, name, stat.size, &config);
 }
 
 fn getOutputStream(self: c.VALUE, name_rb: c.VALUE) callconv(.c) c.VALUE {

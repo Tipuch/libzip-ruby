@@ -98,6 +98,11 @@ pub fn defineClass(libzip: c.VALUE) void {
 
     c.rb_define_const(entry_class, "STORED", c.INT2NUM(c.ZIP_CM_STORE));
     c.rb_define_const(entry_class, "DEFLATED", c.INT2NUM(c.ZIP_CM_DEFLATE));
+    c.rb_define_const(entry_class, "NONE", c.UINT2NUM(c.ZIP_EM_NONE));
+    c.rb_define_const(entry_class, "TRAD_PKWARE", c.UINT2NUM(c.ZIP_EM_TRAD_PKWARE));
+    c.rb_define_const(entry_class, "AES_128", c.UINT2NUM(c.ZIP_EM_AES_128));
+    c.rb_define_const(entry_class, "AES_192", c.UINT2NUM(c.ZIP_EM_AES_192));
+    c.rb_define_const(entry_class, "AES_256", c.UINT2NUM(c.ZIP_EM_AES_256));
 
     c.rb_define_method(entry_class, "name", @ptrCast(&entryName), 0);
     c.rb_define_method(entry_class, "index", @ptrCast(&entryIndex), 0);

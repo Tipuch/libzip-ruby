@@ -25,9 +25,11 @@ pub fn build(b: *std.Build) void {
     // digested into the extension, so the gem depends on nothing at runtime.
     const zlib_dep = b.dependency("zlib", .{ .target = target, .optimize = optimize });
     const libzip_dep = b.dependency("libzip", .{ .target = target, .optimize = optimize });
+    const mbedtls_dep = b.dependency("mbedtls", .{ .target = target, .optimize = optimize });
 
     const zlib_static = addZlib(b, zlib_dep, target, optimize);
-    const libzip_static = addLibZip(b, libzip_dep, zlib_dep, zlib_static, target, optimize);
+    const mbedcrypto_static = mbedtls_dep.artifact("mbedtls");
+    const libzip_static = addLibZip(b, libzip_dep, zlib_dep, mbedtls_dep, zlib_static, mbedcrypto_static, target, optimize);
 
     const translate_c = b.addTranslateC(.{
         .root_source_file = b.path("src/c.h"),
@@ -149,15 +151,15 @@ fn addZlib(
     return b.addLibrary(.{ .name = "zlib", .linkage = .static, .root_module = mod });
 }
 
-/// libzip with a deliberately minimal feature set: no crypto backend (AES),
-/// no bzip2/lzma/zstd, FLATE only.  Crypto is excluded by *omitting* the AES
-/// sources rather than by a flag, because lib/zip_crypto.h ends in
-/// `#error "no crypto backend found"`.
+/// libzip with AES support, but without bzip2/lzma/zstd.
+/// All cryptographic operations are supplied by libzip and mbedcrypto.
 fn addLibZip(
     b: *std.Build,
     dep: *std.Build.Dependency,
     zlib_dep: *std.Build.Dependency,
+    mbedtls_dep: *std.Build.Dependency,
     zlib: *std.Build.Step.Compile,
+    mbedcrypto: *std.Build.Step.Compile,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
 ) *std.Build.Step.Compile {
@@ -171,6 +173,9 @@ fn addLibZip(
     // zipconf.h/config.h are the hand-resolved ones for this static build.
     mod.addIncludePath(b.path("vendor/libzip"));
     mod.addIncludePath(dep.path("lib"));
+    mod.addIncludePath(mbedtls_dep.path("include"));
+    mod.addCMacro("HAVE_CRYPTO", "1");
+    mod.addCMacro("HAVE_MBEDTLS", "1");
     // libzip includes <zlib.h>.  On a native build clang silently finds the
     // *system* one via the host include dirs; cross targets have no system
     // zlib, and linkLibrary() does not propagate include dirs to a dependent's
@@ -209,12 +214,13 @@ fn addLibZip(
     mod.addCSourceFile(.{ .file = err_str, .flags = &.{"-fvisibility=hidden"} });
 
     mod.linkLibrary(zlib);
+    mod.linkLibrary(mbedcrypto);
 
     return b.addLibrary(.{ .name = "zip", .linkage = .static, .root_module = mod });
 }
 
-/// From lib/CMakeLists.txt, minus the three AES sources, plus the two sources
-/// CMake adds on non-Windows.  Excluded with them: bzip2, lzma and zstd.
+/// From lib/CMakeLists.txt, with the three AES sources enabled.
+/// Excluded: bzip2, lzma and zstd.
 const libzip_sources = [_][]const u8{
     "zip_add.c",                          "zip_add_dir.c",                      "zip_add_entry.c",                  "zip_algorithm_deflate.c",             "zip_buffer.c",
     "zip_close.c",                        "zip_delete.c",                       "zip_dir_add.c",                    "zip_dirent.c",                        "zip_discard.c",
@@ -238,7 +244,8 @@ const libzip_sources = [_][]const u8{
     "zip_source_stat.c",                  "zip_source_supports.c",              "zip_source_tell.c",                "zip_source_tell_write.c",             "zip_source_window.c",
     "zip_source_write.c",                 "zip_source_zip.c",                   "zip_source_zip_new.c",             "zip_stat.c",                          "zip_stat_index.c",
     "zip_stat_init.c",                    "zip_strerror.c",                     "zip_string.c",                     "zip_unchange.c",                      "zip_unchange_all.c",
-    "zip_unchange_archive.c",             "zip_unchange_data.c",                "zip_utf-8.c",
+    "zip_unchange_archive.c",             "zip_unchange_data.c",                "zip_utf-8.c",                      "zip_crypto_mbedtls.c",                "zip_winzip_aes.c",
+    "zip_source_winzip_aes_decode.c",     "zip_source_winzip_aes_encode.c",
 };
 
 /// Copy every header under `dir_path` into `wf` beneath `prefix`, dropping the

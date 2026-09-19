@@ -1,12 +1,14 @@
 const c = @import("c");
+const encryption = @import("encryption.zig");
 const errors = @import("errors.zig");
 
 const BUFFER_SIZE: c.zip_uint64_t = 8 * 1024;
 
 pub const InputStream = struct {
     archive_rb: c.VALUE,
-    registry_rb: c.VALUE,
-    self_rb: c.VALUE,
+    head: ?*?*InputStream,
+    prev: ?*InputStream,
+    next: ?*InputStream,
     zip_file: ?*c.zip_file_t,
     buffer: [*]u8,
     size: c.zip_uint64_t,
@@ -20,14 +22,12 @@ fn markStream(raw: ?*anyopaque) callconv(.c) void {
     const ptr = raw orelse return;
     const stream: *InputStream = @ptrCast(@alignCast(ptr));
     c.rb_gc_mark(stream.archive_rb);
-    c.rb_gc_mark(stream.registry_rb);
-    c.rb_gc_mark(stream.self_rb);
 }
 
 fn freeStream(raw: ?*anyopaque) callconv(.c) void {
     const ptr = raw orelse return;
     const stream: *InputStream = @ptrCast(@alignCast(ptr));
-
+    _ = unlink(stream);
     if (stream.zip_file) |zip_file| {
         _ = c.zip_fclose(zip_file);
         stream.zip_file = null;
@@ -66,38 +66,51 @@ fn ensureOpen(stream: *InputStream) void {
 pub fn create(
     archive: *c.zip_t,
     archive_rb: c.VALUE,
-    registry_rb: c.VALUE,
+    head: *?*InputStream,
     name: [*c]const u8,
     size: c.zip_uint64_t,
+    encryption_config: *const encryption.Config,
 ) c.VALUE {
-    const zip_file = c.zip_fopen(archive, name, 0) orelse {
-        errors.raiseCode(c.zip_error_code_zip(c.zip_get_error(archive)));
-    };
+    const maybe_file =
+        if (encryption_config.password_rb == c.Qnil)
+            c.zip_fopen(archive, name, 0)
+        else
+            c.zip_fopen_encrypted(
+                archive,
+                name,
+                0,
+                encryption.passwordPtr(encryption_config),
+            );
 
+    const zip_file = maybe_file orelse {
+        errors.raiseCode(
+            c.zip_error_code_zip(c.zip_get_error(archive)),
+        );
+    };
     const raw_buffer = c.ruby_xmalloc(@intCast(BUFFER_SIZE));
     const buffer: [*]u8 = @ptrCast(raw_buffer);
 
     const stream: *InputStream = @ptrCast(@alignCast(c.ruby_xmalloc(@sizeOf(InputStream))));
 
     stream.* = .{
+        .head = head,
+        .prev = null,
+        .next = head.*,
         .archive_rb = archive_rb,
-        .registry_rb = registry_rb,
-        .self_rb = c.Qnil,
         .zip_file = zip_file,
         .buffer = buffer,
         .size = size,
         .position = 0,
         .eof = size == 0,
     };
+    if (head.*) |first| first.prev = stream;
+    head.* = stream;
 
     const obj = c.TypedData_Wrap_Struct(
         stream_class,
         &stream_type,
         stream,
     );
-
-    stream.self_rb = obj;
-    _ = c.rb_ary_push(registry_rb, obj);
 
     if (c.rb_block_given_p() != 0) {
         return c.rb_ensure(
@@ -134,7 +147,19 @@ fn closeStream(self: c.VALUE) callconv(.c) c.VALUE {
     return closeStreamInternal(getStream(self), true);
 }
 
+fn unlink(stream: *InputStream) void {
+    if (stream.head) |head| {
+        if (stream.prev) |prev| prev.next = stream.next else head.* = stream.next;
+        if (stream.next) |next| next.prev = stream.prev;
+        stream.head = null;
+    }
+
+    stream.prev = null;
+    stream.next = null;
+}
+
 fn closeStreamInternal(stream: *InputStream, raise_errors: bool) callconv(.c) c.VALUE {
+    unlink(stream);
     const zip_file = stream.zip_file orelse {
         stream.eof = true;
         return c.Qnil;
@@ -144,20 +169,14 @@ fn closeStreamInternal(stream: *InputStream, raise_errors: bool) callconv(.c) c.
     stream.zip_file = null;
     stream.eof = true;
 
-    _ = c.rb_ary_delete(stream.registry_rb, stream.self_rb);
-
-    if (raise_errors and exit_code < 0) {
+    if (raise_errors and exit_code != 0) {
         errors.raiseCode(exit_code);
     }
     return c.Qnil;
 }
 
-pub fn closeAllStreams(registry_rb: c.VALUE) void {
-    while (c.RARRAY_LEN(registry_rb) > 0) {
-        const index = c.RARRAY_LEN(registry_rb) - 1;
-        const stream_rb = c.rb_ary_entry(registry_rb, index);
-        _ = closeStreamInternal(getStream(stream_rb), false);
-    }
+pub fn closeAllStreams(head: *?*InputStream) void {
+    while (head.*) |stream| _ = closeStreamInternal(stream, false);
 }
 
 fn streamClosed(self: c.VALUE) callconv(.c) c.VALUE {
