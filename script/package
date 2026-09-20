@@ -242,7 +242,10 @@ class Packager
       needed = capture("readelf", "-d", path).lines.grep(/NEEDED/)
       symbols = capture("nm", "-D", "--defined-only", path)
     else
-      needed = capture("otool", "-L", path).lines.drop(1) # first line is the file
+      # First line is the file; the line after it is the dylib's own install
+      # name (@rpath/libzip_ruby.dylib), not a dependency.
+      needed = capture("otool", "-L", path).lines.drop(1)
+                                           .reject { |line| line.include?(File.basename(path)) }
       symbols = capture("nm", "-gU", path)
     end
 
