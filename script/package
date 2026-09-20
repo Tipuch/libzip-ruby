@@ -46,7 +46,7 @@ TARGETS = {
 # as happily, so one runner covers both Darwin platforms (the Ruby headers of
 # either Darwin arch are ABI-compatible with the other).  Likewise one Linux
 # runner covers all four Linux targets.
-RUNNERS = { "linux" => "ubuntu-24.04", "darwin" => "macos-15" }.freeze
+RUNNERS = { "linux" => "ubuntu-26.04", "darwin" => "macos-15" }.freeze
 
 # The ABIs the published gems carry a compiled extension for.  Matches
 # required_ruby_version in libzip-ruby.gemspec; Ruby 3.2 is EOL as of 2026-03

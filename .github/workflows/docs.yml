@@ -1,9 +1,5 @@
 name: docs
 
-# doc/api.rb is the API reference: the extension is Zig, which RDoc can't
-# parse, so the Ruby surface is written out by hand.  `script/doc --check`
-# compares it with the built extension before anything goes live, so the site
-# can't describe methods the gem doesn't have.
 on:
   push:
     branches: [main]
@@ -14,16 +10,13 @@ permissions:
   pages: write
   id-token: write
 
-# One deploy at a time, and no cancelling one halfway: the site is the artifact.
 concurrency:
   group: pages
   cancel-in-progress: false
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
-    # Keeps the Zig cache inside the workspace, at one path on every runner,
-    # which is what actions/cache stores.
+    runs-on: ubuntu-26.04
     env:
       ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.cache/zig
     steps:
@@ -31,10 +24,6 @@ jobs:
       - uses: ruby/setup-ruby@a0102e0972be65f351c307e2d64b9314a57c8073 # v1
         with:
           ruby-version: "3.4"
-      # The Zig global cache holds the dependency sources and the compiled
-      # objects of libzip, zlib and mbedTLS: ~88 MB, and the difference between
-      # a 2m11s cold build and a 17s warm one.  `master` moves, so the key
-      # carries the version it resolves to today, not the word in mise.toml.
       - id: zig
         run: echo "version=$(script/install-zig --resolve)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -42,10 +31,7 @@ jobs:
           path: .cache/zig
           key: zig-${{ runner.os }}-${{ steps.zig.outputs.version }}-ruby-3.4-${{ hashFiles('build.zig', 'build.zig.zon') }}
           restore-keys: zig-${{ runner.os }}-${{ steps.zig.outputs.version }}-ruby-3.4-
-      # No marketplace action: script/install-zig is curl and tar, and it takes
-      # the version from mise.toml, the same file a local checkout uses.
       - run: script/install-zig
-      # --check loads the real extension, so it has to exist.
       - run: zig build
       - run: script/doc --check
       - run: script/doc
@@ -56,7 +42,7 @@ jobs:
 
   deploy:
     needs: build
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
