@@ -68,6 +68,10 @@ class Packager
 
   def host_targets = TARGETS.select { |_, t| t[:os] == host_os }.keys
 
+  # Platforms with at least one compiled extension sitting under pkg/, whoever
+  # built it: the only thing `gem` can work from.
+  def packed_targets = TARGETS.keys.select { |platform| !compiled_in(platform).empty? }
+
   # -- paths --------------------------------------------------------------
 
   def gem_root(platform) = File.join(PKG_DIR, platform)
@@ -110,9 +114,9 @@ class Packager
   end
 
   def gem
-    targets.each do |platform|
+    targets(cross: true).each do |platform|
       root = gem_root(platform)
-      compiled = Dir[File.join(root, "lib", "libzip_ruby", "*", "libzip_ruby.*")]
+      compiled = compiled_in(platform)
       abort "no compiled extensions under #{relative root} - run `script/package build` first" if compiled.empty?
       abis = compiled.map { |so| File.basename(File.dirname(so)) }.sort
 
@@ -211,15 +215,23 @@ class Packager
     say "  -> #{relative dest}"
   end
 
-  def targets
+  # `cross` marks a command that compiles nothing and so is not bound by this
+  # host's Ruby headers; it packs whatever is already under pkg/ instead.
+  def targets(cross: false)
+    default = cross ? packed_targets : host_targets
     list = options[:targets]
     # `all` means every platform *this host* can build, not every platform that
     # exists: the cross-OS ones need their own headers (see below).
-    list = host_targets if list == ["all"]
-    list ||= host_targets
+    list = default if list == ["all"]
+    list ||= default
 
     unknown = list - TARGETS.keys
     abort "unknown target(s): #{unknown.join(', ')} (see `script/package list`)" unless unknown.empty?
+
+    if cross
+      abort "nothing to package under #{relative PKG_DIR} - run `script/package build` first" if list.empty?
+      return list
+    end
 
     foreign = list.reject { |platform| TARGETS.fetch(platform)[:os] == host_os }
     if !foreign.empty? && !options[:force_cross]
@@ -253,6 +265,8 @@ class Packager
     abort "unexpected dependencies in #{File.basename(path)}:\n#{leaked.join}" unless leaked.empty?
     abort "#{File.basename(path)} does not export Init_libzip_ruby" unless symbols.match?(/Init_libzip_ruby/)
   end
+
+  def compiled_in(platform) = Dir[File.join(gem_root(platform), "lib", "libzip_ruby", "*", "libzip_ruby.*")]
 
   def capture(*cmd)
     output = IO.popen(cmd, chdir: ROOT, &:read)
