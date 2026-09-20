@@ -12,11 +12,12 @@ pub fn build(b: *std.Build) void {
         @panic(@errorName(err));
     };
 
-    // Zig's translate-c preprocessor (aro) mishandles a directive line with
-    // a complete block comment as the only payload (`# /* ... */`).  It eats
-    // the following line, which throws the `#if`/`#endif` stack out of balance
-    // and makes ruby.h fail to translate.  Ruby's headers use that style a lot,
-    // so translate using a copy with those lines removed.
+    // Zig's translate-c preprocessor (aro) mishandles a null directive: a `#`
+    // with no payload, or with a complete block comment as its only payload
+    // (`# /* ... */`).  It eats the following line, which throws the
+    // `#if`/`#endif` stack out of balance and makes ruby.h fail to translate.
+    // Ruby's headers use both forms, so translate using a copy with those
+    // lines removed.
     const headers = b.addWriteFiles();
     const hdr = sanitizeHeaders(b, headers, rubyhdrdir, "hdr");
     const archhdr = sanitizeHeaders(b, headers, rubyarchhdrdir, "archhdr");
@@ -283,21 +284,21 @@ fn sanitizeHeaders(
         ) catch |err| std.debug.panic("read {s}: {s}", .{ entry.path, @errorName(err) });
 
         const dest = b.pathJoin(&.{ prefix, entry.path });
-        _ = wf.add(dest, stripCommentOnlyDirectives(b.allocator, source));
+        _ = wf.add(dest, stripNullDirectives(b.allocator, source));
     }
 
     return wf.getDirectory().path(b, prefix);
 }
 
-/// Remove lines of the form `# /* ... */` -- a null directive with only one
-/// complete block comment.  All other lines are kept as-is, so line
+/// Remove null directive lines -- a bare `#`, or a `#` whose only payload is
+/// one complete block comment.  All other lines are kept as-is, so line
 /// counts shift but no code changes.
-fn stripCommentOnlyDirectives(gpa: std.mem.Allocator, source: []const u8) []const u8 {
+fn stripNullDirectives(gpa: std.mem.Allocator, source: []const u8) []const u8 {
     var out = std.ArrayList(u8).initCapacity(gpa, source.len) catch @panic("OOM");
 
     var it = std.mem.splitScalar(u8, source, '\n');
     while (it.next()) |line| {
-        if (!isCommentOnlyDirective(line)) {
+        if (!isNullDirective(line)) {
             out.appendSlice(gpa, line) catch @panic("OOM");
         }
         out.append(gpa, '\n') catch @panic("OOM");
@@ -306,11 +307,12 @@ fn stripCommentOnlyDirectives(gpa: std.mem.Allocator, source: []const u8) []cons
     return out.items;
 }
 
-fn isCommentOnlyDirective(line: []const u8) bool {
+fn isNullDirective(line: []const u8) bool {
     const trimmed = std.mem.trim(u8, line, " \t\r");
     if (trimmed.len == 0 or trimmed[0] != '#') return false;
 
     const body = std.mem.trimStart(u8, trimmed[1..], " \t");
+    if (body.len == 0) return true;
     if (!std.mem.startsWith(u8, body, "/*")) return false;
 
     // Block comments don't nest, so the first `*/` closes it.  Only remove the
