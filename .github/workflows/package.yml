@@ -28,8 +28,8 @@ jobs:
       compile: ${{ steps.emit.outputs.compile }}
       gem: ${{ steps.emit.outputs.gem }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: ruby/setup-ruby@v1
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ruby/setup-ruby@a0102e0972be65f351c307e2d64b9314a57c8073 # v1
         with:
           ruby-version: "3.4"
       - name: Emit matrix
@@ -56,15 +56,15 @@ jobs:
     env:
       ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.cache/zig
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: ruby/setup-ruby@v1
+      - uses: ruby/setup-ruby@a0102e0972be65f351c307e2d64b9314a57c8073 # v1
         with:
           ruby-version: ${{ matrix.ruby }}
           bundler-cache: false
       - id: zig
         run: echo "version=$(script/install-zig --resolve)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .cache/zig
           key: zig-${{ runner.os }}-${{ steps.zig.outputs.version }}-ruby-${{ matrix.ruby }}-${{ hashFiles('build.zig', 'build.zig.zon') }}
@@ -74,7 +74,7 @@ jobs:
       - name: Build
         run: script/package build --targets=${{ join(matrix.targets, ',') }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: so-${{ matrix.os }}-${{ matrix.ruby }}
           path: pkg/*/lib
@@ -89,11 +89,11 @@ jobs:
         include: ${{ fromJSON(needs.matrix.outputs.gem) }}
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: ruby/setup-ruby@v1
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ruby/setup-ruby@a0102e0972be65f351c307e2d64b9314a57c8073 # v1
         with:
           ruby-version: "3.4"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: so-*
           path: pkg
@@ -102,7 +102,7 @@ jobs:
       - name: Assemble
         run: script/package gem --targets=${{ matrix.platform }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: gem-${{ matrix.platform }}
           path: pkg/*.gem
@@ -117,19 +117,19 @@ jobs:
       contents: write
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: gem-*
           path: dist
           merge-multiple: true
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: dist/*.gem
 
-      - uses: ruby/setup-ruby@v1
+      - uses: ruby/setup-ruby@a0102e0972be65f351c307e2d64b9314a57c8073 # v1
         with:
           ruby-version: "3.4"
-      - uses: rubygems/configure-rubygems-credentials@v2.1.0
+      - uses: rubygems/configure-rubygems-credentials@dc5a8d8553e6ee01fc26761a49e99e733d17954a # v2.1.0
 
       - name: Push to RubyGems
         run: |

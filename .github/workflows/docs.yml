@@ -27,8 +27,8 @@ jobs:
     env:
       ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.cache/zig
     steps:
-      - uses: actions/checkout@v4
-      - uses: ruby/setup-ruby@v1
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ruby/setup-ruby@a0102e0972be65f351c307e2d64b9314a57c8073 # v1
         with:
           ruby-version: "3.4"
       # The Zig global cache holds the dependency sources and the compiled
@@ -37,7 +37,7 @@ jobs:
       # carries the version it resolves to today, not the word in mise.toml.
       - id: zig
         run: echo "version=$(script/install-zig --resolve)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .cache/zig
           key: zig-${{ runner.os }}-${{ steps.zig.outputs.version }}-ruby-3.4-${{ hashFiles('build.zig', 'build.zig.zon') }}
@@ -49,8 +49,8 @@ jobs:
       - run: zig build
       - run: script/doc --check
       - run: script/doc
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:
           path: doc/html
 
@@ -62,4 +62,4 @@ jobs:
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - id: deploy
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
