@@ -499,6 +499,7 @@ To contribute to the project:
 
 ```sh
 mise install           # Zig 0.17-dev and Ruby, per mise.toml
+script/install-zig     # the same Zig without mise, which is what CI runs
 zig build              # builds zig-out/lib/libzip_ruby.so
 zig build test         # Zig unit tests + the minitest suite
 script/doc             # API docs into doc/html

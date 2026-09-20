@@ -14,6 +14,10 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-24.04
+    # Keeps the Zig cache inside the workspace, at one path on every runner,
+    # which is what actions/cache stores.
+    env:
+      ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.cache/zig
     strategy:
       fail-fast: false
       matrix:
@@ -23,9 +27,20 @@ jobs:
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ matrix.ruby }}
-      - uses: mlugg/setup-zig@v1
+      # The Zig global cache holds the dependency sources and the compiled
+      # objects of libzip, zlib and mbedTLS: ~88 MB, and the difference between
+      # a 2m11s cold build and a 17s warm one.  `master` moves, so the key
+      # carries the version it resolves to today, not the word in mise.toml.
+      - id: zig
+        run: echo "version=$(script/install-zig --resolve)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
         with:
-          version: 0.17.0-dev.2085+5e36170b5
+          path: .cache/zig
+          key: zig-${{ runner.os }}-${{ steps.zig.outputs.version }}-ruby-${{ matrix.ruby }}-${{ hashFiles('build.zig', 'build.zig.zon') }}
+          restore-keys: zig-${{ runner.os }}-${{ steps.zig.outputs.version }}-ruby-${{ matrix.ruby }}-
+      # No marketplace action: script/install-zig is curl and tar, and it takes
+      # the version from mise.toml, the same file a local checkout uses.
+      - run: script/install-zig
       - run: sudo apt-get update && sudo apt-get install -y valgrind
       - run: script/check
       # doc/api.rb declares the Ruby API by hand; this fails the build when it

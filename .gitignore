@@ -5,3 +5,4 @@ zig-out/
 zig-pkg/
 pkg/
 doc/html/
+.cache/

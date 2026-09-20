@@ -13,10 +13,6 @@ on:
       rubies:
         description: Ruby ABIs to build (comma separated)
         default: "3.3,3.4,4.0"
-      publish:
-        description: Push the resulting gems to RubyGems
-        type: boolean
-        default: false
 
 concurrency:
   group: package-${{ github.ref }}
@@ -27,7 +23,7 @@ permissions:
 
 jobs:
   matrix:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     outputs:
       compile: ${{ steps.emit.outputs.compile }}
       gem: ${{ steps.emit.outputs.gem }}
@@ -57,17 +53,23 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.matrix.outputs.compile) }}
     runs-on: ${{ matrix.runner }}
+    env:
+      ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.cache/zig
     steps:
       - uses: actions/checkout@v4
 
-      # mise.toml is the single source of truth for the Zig version.  It reports
-      # `zig = "master"` right now, which floats; pin an exact `0.17.0-dev.<n>`
-      # build when you want CI to be reproducible over time.
-      - uses: jdx/mise-action@v2
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ matrix.ruby }}
           bundler-cache: false
+      - id: zig
+        run: echo "version=$(script/install-zig --resolve)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: .cache/zig
+          key: zig-${{ runner.os }}-${{ steps.zig.outputs.version }}-ruby-${{ matrix.ruby }}-${{ hashFiles('build.zig', 'build.zig.zon') }}
+          restore-keys: zig-${{ runner.os }}-${{ steps.zig.outputs.version }}-ruby-${{ matrix.ruby }}-
+      - run: script/install-zig
 
       - name: Build
         run: script/package build --targets=${{ join(matrix.targets, ',') }}
@@ -85,8 +87,6 @@ jobs:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.matrix.outputs.gem) }}
-    # `gem build` only looks at a gemspec, and the platform comes from an env var,
-    # so any machine can assemble any platform's gem.
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
@@ -113,7 +113,6 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: gem
     runs-on: ubuntu-26.04
-    environment: release
     permissions:
       contents: write
       id-token: write

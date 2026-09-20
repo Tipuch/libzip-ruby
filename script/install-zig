@@ -1,0 +1,124 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# script/install-zig - fetch the Zig compiler this project builds with.
+#
+#   script/install-zig                  the version named in mise.toml
+#   script/install-zig master           the current nightly
+#   script/install-zig 0.16.0           a tagged release
+#   script/install-zig --dir=PATH       where to unpack it
+#   script/install-zig --resolve        print the version, download nothing
+#
+# This is here instead of a marketplace action so that CI depends on curl, tar
+# and ziglang.org, and on no more than that.  mise.toml remains the single
+# source of truth for the version, the same file a local checkout uses.
+#
+# Under GITHUB_PATH the bin directory is appended to it, so later steps can
+# call `zig` directly.  Otherwise the directory is printed, for `export PATH=`.
+#
+# ziglang.org/download/index.json lists the tagged releases and the current
+# master; an older nightly (0.17.0-dev.2085+5e36170b5) isn't in it, so its URL
+# is built by hand.  ziglang.org clears nightlies out after a few months, which
+# is how CI broke on 2026-09-20: a pin that no longer downloads.
+
+require "digest"
+require "fileutils"
+require "json"
+require "rbconfig"
+require "tmpdir"
+
+ROOT = File.expand_path("..", __dir__)
+INDEX_URL = "https://ziglang.org/download/index.json"
+BUILDS_URL = "https://ziglang.org/builds"
+
+def fail!(message) = abort("script/install-zig: #{message}")
+
+def curl(url, *args)
+  output = IO.popen(["curl", "-fsSL", *args, url], &:read)
+  $?.success? ? output : nil
+end
+
+# "x86_64-linux", "aarch64-macos", and so on: the key index.json uses, and the
+# spelling in a current tarball name.
+def host
+  cpu = RbConfig::CONFIG["host_cpu"]
+  cpu = "aarch64" if cpu == "arm64"
+  os = RbConfig::CONFIG["host_os"].match?(/darwin/) ? "macos" : "linux"
+  "#{cpu}-#{os}"
+end
+
+def mise_version
+  mise = File.read(File.join(ROOT, "mise.toml"))
+  mise[/^\s*zig\s*=\s*"([^"]+)"/, 1] or fail!("mise.toml has no zig entry")
+end
+
+# => [url, shasum or nil, resolved version]
+def resolve(version)
+  index = JSON.parse(curl(INDEX_URL) || fail!("can't reach #{INDEX_URL}"))
+  entry = index[version]
+
+  if entry
+    build = entry[host] or fail!("#{version} has no build for #{host}")
+    [build.fetch("tarball"), build["shasum"], entry.fetch("version", version)]
+  else
+    # An older nightly. The naming changed during 0.17-dev, so both forms are
+    # candidates, and download() tries them in order.
+    cpu, os = host.split("-")
+    [["#{BUILDS_URL}/zig-#{host}-#{version}.tar.xz",
+      "#{BUILDS_URL}/zig-#{os}-#{cpu}-#{version}.tar.xz"], nil, version]
+  end
+end
+
+def download(urls, shasum, dest)
+  Array(urls).each do |url|
+    warn "fetching #{url}"
+    body = curl(url, "-o", dest, "-w", "%{http_code}")
+    next unless body
+
+    if shasum && Digest::SHA256.file(dest).hexdigest != shasum
+      fail!("checksum mismatch for #{url}")
+    end
+    return url
+  end
+  fail!("none of the candidate URLs could be downloaded: #{Array(urls).join(', ')}")
+end
+
+version = nil
+dir = nil
+resolve_only = false
+ARGV.each do |arg|
+  case arg
+  when /\A--dir=(.+)\z/ then dir = File.expand_path($1)
+  when "--resolve" then resolve_only = true
+  when /\A-/ then fail!("unknown option: #{arg}")
+  else version = arg
+  end
+end
+version ||= mise_version
+
+urls, shasum, resolved = resolve(version)
+
+# `master` moves, so a cache key built from mise.toml alone would go stale
+# against a compiler that changed under it.  This prints what mise.toml means
+# today, which is what the key in .github/workflows keys on.
+if resolve_only
+  puts resolved
+  exit
+end
+dir ||= File.join(Dir.home, ".cache", "libzip-ruby", "zig", resolved)
+zig = File.join(dir, "zig")
+
+# Already unpacked: a cached toolchain directory makes this do no work.
+unless File.executable?(zig)
+  FileUtils.mkdir_p dir
+  tarball = File.join(Dir.tmpdir, "zig-#{resolved}.tar.xz")
+  download(urls, shasum, tarball)
+  system("tar", "xf", tarball, "-C", dir, "--strip-components=1") or fail!("tar failed")
+  File.unlink tarball
+end
+
+File.write(ENV["GITHUB_PATH"], "#{dir}\n", mode: "a") if ENV["GITHUB_PATH"]
+# The version goes to stderr so that stdout is 1 line, the directory, which
+# is what `export PATH="$(script/install-zig):$PATH"` needs.
+system(zig, "version", out: :err) or fail!("#{zig} doesn't run")
+puts dir
