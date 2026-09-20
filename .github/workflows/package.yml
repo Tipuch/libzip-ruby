@@ -117,18 +117,25 @@ jobs:
       contents: write
       id-token: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ruby/setup-ruby@a0102e0972be65f351c307e2d64b9314a57c8073 # v1.324.0
+        with:
+          ruby-version: "3.4"
+
+      - name: Verify tag matches gem version
+        run: |
+          version=$(ruby -e 'puts Gem::Specification.load("libzip-ruby.gemspec").version')
+          if [ "$GITHUB_REF" != "refs/tags/v$version" ]; then
+            echo "::error::tag $GITHUB_REF does not match gemspec version $version"
+            exit 1
+          fi
+
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: gem-*
           path: dist
           merge-multiple: true
-      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
-        with:
-          files: dist/*.gem
 
-      - uses: ruby/setup-ruby@a0102e0972be65f351c307e2d64b9314a57c8073 # v1.324.0
-        with:
-          ruby-version: "3.4"
       - uses: rubygems/configure-rubygems-credentials@dc5a8d8553e6ee01fc26761a49e99e733d17954a # v2.1.0
 
       - name: Push to RubyGems
@@ -136,3 +143,7 @@ jobs:
           for file in dist/*.gem; do
             gem push "$file"
           done
+
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          files: dist/*.gem
