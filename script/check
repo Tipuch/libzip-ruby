@@ -46,7 +46,9 @@ if [[ $run_valgrind -eq 1 ]]; then
         echo "valgrind not installed, skipping" >&2
     else
         step "valgrind (Debug build)"
-        zig build "-Doptimize=Debug"
+        # Valgrind can't decode the EVEX/AVX-512 instructions a native build
+        # emits on some hosts; baseline is also what the packaged gem gets.
+        zig build "-Doptimize=Debug" -Dcpu=baseline
         # RUBY_FREE_AT_EXIT forces each dfree to run at shutdown, which is the
         # teardown ordering the stream and archive lifetimes depend on.
         #
