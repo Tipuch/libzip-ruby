@@ -4,3 +4,4 @@ zig-out/
 .idea/
 zig-pkg/
 pkg/
+doc/html/

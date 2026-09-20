@@ -28,3 +28,6 @@ jobs:
           version: 0.17.0-dev.2085+5e36170b5
       - run: sudo apt-get update && sudo apt-get install -y valgrind
       - run: script/check
+      # doc/api.rb declares the Ruby API by hand; this fails the build when it
+      # no longer matches src/*.zig.
+      - run: script/doc --check

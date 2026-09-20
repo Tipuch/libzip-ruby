@@ -1,0 +1,169 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# script/doc - generate the API documentation, and keep it truthful.
+#
+#   script/doc              generate doc/html
+#   script/doc --check      compare doc/api.rb with the built extension
+#   script/doc --coverage   list what is still undocumented
+#   script/doc --clean
+#
+# The API is in Zig, which RDoc can't parse, so doc/api.rb spells out the Ruby
+# surface by hand (see its header).  --check is what keeps that file in step
+# with src/*.zig: it dumps the classes, constants, ancestors and methods of the
+# stubs and of the real extension, in 2 child processes since both define
+# LibZip, and diffs one with the other.
+#
+# --check needs the extension built: `zig build` first.
+
+require "json"
+require "optparse"
+require "rbconfig"
+
+ROOT = File.expand_path("..", __dir__)
+STUBS = File.join(ROOT, "doc", "api.rb")
+HTML_DIR = File.join(ROOT, "doc", "html")
+EXTENSION_DIR = File.join(ROOT, "zig-out", "lib")
+
+# Dumps all of LibZip that the stubs are supposed to match.  Run in a child
+# process, over either doc/api.rb or the extension.
+DUMP = <<~SCRIPT
+  require "json"
+  dump = {}
+  LibZip.constants.sort.each do |name|
+    value = LibZip.const_get(name)
+    if value.is_a?(Module)
+      dump["LibZip::\#{name}"] = {
+        # Cuts off at Object: below it are Kernel and whatever the dump
+        # required, which say no more about this gem than about any other.
+        "ancestors" => value.ancestors.take_while { |mod| mod != Object }.map(&:to_s),
+        "constants" => value.constants(false).sort.map { |const|
+          inner = value.const_get(const)
+          inner.is_a?(Integer) ? "\#{const}=\#{inner}" : const.to_s
+        },
+        "instance_methods" => value.public_instance_methods(false).sort.map(&:to_s),
+        "singleton_methods" => value.singleton_methods(false).sort.map(&:to_s),
+      }
+    else
+      (dump["LibZip"] ||= { "constants" => [] })["constants"] << [name.to_s, nil]
+    end
+  end
+  puts JSON.dump(dump)
+SCRIPT
+
+def gem_version
+  require "rubygems"
+  Gem::Specification.load(File.join(ROOT, "libzip-ruby.gemspec")).version.to_s
+end
+
+def say(message) = puts(message)
+
+def fail!(message)
+  warn message
+  exit 1
+end
+
+# -- generate ---------------------------------------------------------------
+
+def rdoc(*args)
+  system(RbConfig.ruby, "-S", "rdoc", *args, chdir: ROOT) or fail!("rdoc failed")
+end
+
+def generate
+  rdoc "--op", HTML_DIR,
+       "--main", "README.md",
+       "--title", "libzip-ruby #{gem_version}",
+       "--visibility", "public",
+       "README.md", "doc/api.rb", "lib"
+  say "-> #{HTML_DIR.delete_prefix("#{ROOT}/")}/index.html"
+end
+
+def coverage
+  rdoc "--coverage-report", "README.md", "doc/api.rb", "lib"
+end
+
+def clean
+  require "fileutils"
+  FileUtils.rm_rf HTML_DIR
+  say "removed #{HTML_DIR.delete_prefix("#{ROOT}/")}"
+end
+
+# -- check ------------------------------------------------------------------
+
+def dump(*ruby_args, label:)
+  output = IO.popen([RbConfig.ruby, *ruby_args, "-e", DUMP], chdir: ROOT, &:read)
+  fail!("could not load the #{label}") unless $?.success?
+  JSON.parse(output)
+end
+
+# Reports the 2 cases separately: a stub for something that no longer exists is
+# as much a bug in the docs as a method with no documentation at all.
+def report(context, documented, defined)
+  missing = defined - documented
+  extra = documented - defined
+  problems = []
+  problems << "#{context}: not documented: #{missing.join(', ')}" unless missing.empty?
+  problems << "#{context}: documented but not defined: #{extra.join(', ')}" unless extra.empty?
+  problems
+end
+
+def check
+  unless File.exist?(File.join(EXTENSION_DIR, "libzip_ruby.#{RbConfig::CONFIG['DLEXT']}"))
+    fail!("no extension in #{EXTENSION_DIR.delete_prefix("#{ROOT}/")} - run `zig build` first")
+  end
+
+  stubs = dump("-r#{STUBS}", label: "stubs")
+  real = dump("-I#{EXTENSION_DIR}", "-rlibzip_ruby", label: "extension")
+
+  problems = report("LibZip", stubs.keys.sort, real.keys.sort)
+
+  (stubs.keys & real.keys).sort.each do |name|
+    %w[constants instance_methods singleton_methods ancestors].each do |part|
+      documented = stubs[name][part] || []
+      defined = real[name][part] || []
+      # Order counts for ancestors (it's the lookup chain), not for the rest.
+      if part == "ancestors"
+        problems << "#{name}: ancestors are #{documented.inspect}, extension has #{defined.inspect}" if documented != defined
+      else
+        problems.concat report("#{name}##{part}", documented.sort, defined.sort)
+      end
+    end
+  end
+
+  # The dump includes values for Integer constants only, so VERSION is fetched
+  # separately; the gemspec is its source of truth.
+  documented_version = IO.popen([RbConfig.ruby, "-r#{STUBS}", "-e", "print LibZip::VERSION"], chdir: ROOT, &:read)
+  if documented_version != gem_version
+    problems << "LibZip::VERSION is #{documented_version.inspect} in doc/api.rb, #{gem_version.inspect} in the gemspec"
+  end
+
+  if problems.empty?
+    say "doc/api.rb matches the extension"
+  else
+    problems.each { |problem| warn problem }
+    fail!("\ndoc/api.rb is out of date with src/*.zig")
+  end
+end
+
+# -- main -------------------------------------------------------------------
+
+action = :generate
+parser = OptionParser.new do |o|
+  o.banner = "usage: script/doc [--check | --coverage | --clean]"
+  o.on("--check", "compare doc/api.rb against the built extension") { action = :check }
+  o.on("--coverage", "report undocumented classes and methods") { action = :coverage }
+  o.on("--clean", "remove doc/html") { action = :clean }
+  o.on("-h", "--help") do
+    puts o
+    exit
+  end
+end
+parser.parse!(ARGV)
+fail!(parser.to_s) unless ARGV.empty?
+
+case action
+when :generate then generate
+when :check    then check
+when :coverage then coverage
+when :clean    then clean
+end

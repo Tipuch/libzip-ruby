@@ -6,15 +6,16 @@ writing zip archives.
 - **No compile step.** libzip and zlib are statically linked into the
   extension and published precompiled per platform, so `gem install` calls no
   C toolchain.
-- **No runtime dependencies.** No system libzip, no zlib, no OpenSSL needed.
-  The bundled libzip symbols are hidden, so it runs alongside a
-  system libzip or with rubyzip.
+- **No runtime dependencies.** No system libzip, no zlib, no OpenSSL needed. .
 - **Familiar surface.** `LibZip::File.open` / `#add` / `#get_output_stream` /
-  `#read` - rubyzip's method names, under the `LibZip` namespace.
+  `#read`.
 - **Encryption included.** AES-128/192/256 reading and writing, plus read-only
   ZipCrypto, with the crypto performed by a statically linked mbedTLS.
 
 Requires Ruby 3.3 or newer.
+
+Full API documentation: <https://tipuch.github.io/libzip-ruby/>, or `ri
+LibZip::File` once the gem is installed.
 
 ## Installation
 
@@ -193,9 +194,6 @@ in the archive gives `LibZip::NotFoundError`.
 
 ### Listing entries
 
-No extraction happens and no entry bytes are read: each `LibZip::Entry` is a
-snapshot taken directly out of the central directory.
-
 ```ruby
 LibZip::File.open("archive.zip") do |zip|
   zip.names                     # => ["docs/", "docs/a.txt", "greeting.txt"]
@@ -266,12 +264,57 @@ that fails keeps the archive on disk as it was. Removing the only remaining
 entry would produce an empty archive, and libzip won't write those: the file is
 removed from disk instead of being written again with an empty directory.
 
+### Renaming entries
+
+```ruby
+renamed = zip.rename("draft.txt", "final.txt")
+renamed = zip.rename(entry, "final.txt")     # an Entry works too
+renamed.name                                  # => "final.txt"
+renamed.size                                  # metadata comes along
+```
+
+`rename` returns the entry as it is after the rename, a snapshot like the one
+`remove` gives you, so it remains readable once the archive is closed. Size,
+CRC, time and compression are preserved; only the name changes.
+
+Renaming moves 1 record, not a subtree: the children of a directory entry keep
+the names they were stored with, whatever the directory is called after that.
+
+A missing `old_name` gives `LibZip::NotFoundError`, and a `new_name` that's
+already taken gives `LibZip::AlreadyExistsError`. Directory has to match at
+both ends (a directory entry keeps its trailing `/`).
+
 ### Overwriting
 
 `add` and `get_output_stream` both pass `ZIP_FL_OVERWRITE`, so writing the same
 entry name a second time replaces the first copy instead of raising
-`LibZip::AlreadyExistsError`. That's what makes the "drop a file into an
-existing archive" pattern above work.
+`LibZip::AlreadyExistsError`.
+
+## Comments
+
+A zip file has room for 1 comment on the archive and 1 on each entry.
+
+```ruby
+LibZip::File.open("archive.zip", create: true) do |zip|
+  zip.add("a.txt", "a.txt")
+
+  zip.comment = "built by the nightly job"
+  zip.set_comment("a.txt", "the important one")
+end
+
+LibZip::File.open("archive.zip") do |zip|
+  zip.comment              # => "built by the nightly job"
+  zip["a.txt"].comment     # => "the important one"
+end
+```
+
+Both are written when the archive is closed. `nil` clears a comment, and a
+missing comment comes back as `nil`, not as `""`.
+
+The zip format gives the field 16 bits, so a comment longer than 65535 bytes
+gives `LibZip::InvalidArgumentError`. Entry comments come back through
+`Entry#comment`, and like the rest of an entry's metadata they're a snapshot:
+still readable after the archive is closed.
 
 ## Reading entries as a stream
 
@@ -302,8 +345,7 @@ end
 
 ## Encryption
 
-libzip does the cryptography; this gem only selects methods and passes
-passwords. AES-128, AES-192 and AES-256 are supported for reading and writing.
+libzip takes care of the cryptography. AES-128, AES-192 and AES-256 are supported for reading and writing.
 Traditional ZipCrypto is supported for reading, and reading only.
 
 **Writing.** Pass `encryption:` (and optionally `password:`) to `add` or
@@ -320,7 +362,7 @@ end
 ```
 
 Accepted values are `:aes128`, `:aes192`, `:aes256`, `:none` and `nil`.
-`:pkware` is turned away for writing: libzip documents ZipCrypto as broken.
+`:pkware` is turned off for writing: libzip documents ZipCrypto as deprecated.
 
 **Reading.** The password can come from the archive, from the call, or from
 `File#password=`:
@@ -459,8 +501,12 @@ To contribute to the project:
 mise install           # Zig 0.17-dev and Ruby, per mise.toml
 zig build              # builds zig-out/lib/libzip_ruby.so
 zig build test         # Zig unit tests + the minitest suite
+script/doc             # API docs into doc/html
+script/doc --check     # doc/api.rb vs. the built extension
 script/package list    # platform matrix, and what this host can build
 ```
+
+The API reference is written out by hand in `doc/api.rb`.
 
 ## License
 

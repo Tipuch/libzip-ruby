@@ -1,0 +1,50 @@
+name: docs
+
+# doc/api.rb is the API reference: the extension is Zig, which RDoc can't
+# parse, so the Ruby surface is written out by hand.  `script/doc --check`
+# compares it with the built extension before anything goes live, so the site
+# can't describe methods the gem doesn't have.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time, and no cancelling one halfway: the site is the artifact.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.17.0-dev.2085+5e36170b5
+      # --check loads the real extension, so it has to exist.
+      - run: zig build
+      - run: script/doc --check
+      - run: script/doc
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: doc/html
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

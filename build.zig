@@ -29,6 +29,12 @@ pub fn build(b: *std.Build) void {
 
     const zlib_static = addZlib(b, zlib_dep, target, optimize);
     const mbedcrypto_static = mbedtls_dep.artifact("mbedtls");
+    // Its objects end up inside libzip_ruby.so, like zlib's and libzip's, so
+    // they must be PIC.  We set it here because the flag belongs to mbedTLS's
+    // own build.zig, which doesn't: on a glibc target PIC is the default and
+    // the omission is invisible, while a musl target defaults to non-PIC and
+    // the link fails on thousands of absolute relocations.
+    mbedcrypto_static.root_module.pic = true;
     const libzip_static = addLibZip(b, libzip_dep, zlib_dep, mbedtls_dep, zlib_static, mbedcrypto_static, target, optimize);
 
     const translate_c = b.addTranslateC(.{

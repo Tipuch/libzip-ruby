@@ -87,7 +87,7 @@ jobs:
         include: ${{ fromJSON(needs.matrix.outputs.gem) }}
     # `gem build` only looks at a gemspec, and the platform comes from an env var,
     # so any machine can assemble any platform's gem.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
       - uses: ruby/setup-ruby@v1
@@ -112,9 +112,11 @@ jobs:
     name: release
     if: startsWith(github.ref, 'refs/tags/v')
     needs: gem
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
+    environment: release
     permissions:
       contents: write
+      id-token: write
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -125,12 +127,12 @@ jobs:
         with:
           files: dist/*.gem
 
-      # Swap in `rubygems/release-gem@v1` if you would prefer RubyGems
-      # trusted publishing (OIDC) than a long-lived API key.
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+      - uses: rubygems/configure-rubygems-credentials@v2.1.0
+
       - name: Push to RubyGems
-        env:
-          GEM_HOST_API_KEY: ${{ secrets.RUBYGEMS_API_KEY }}
-        if: ${{ env.GEM_HOST_API_KEY != '' }}
         run: |
           for file in dist/*.gem; do
             gem push "$file"

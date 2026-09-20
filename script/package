@@ -139,6 +139,13 @@ class Packager
       FileUtils.rm_rf stash
       FileUtils.cp File.join(ROOT, GEMSPEC), root
       FileUtils.cp File.join(ROOT, "LICENSE"), root
+      # The gemspec's rdoc settings point at these two, so `gem install`
+      # generates ri documentation from them; without the copy the gem would
+      # list files it doesn't carry.
+      FileUtils.cp File.join(ROOT, "README.md"), root
+      FileUtils.rm_rf File.join(root, "doc")
+      FileUtils.mkdir_p File.join(root, "doc")
+      FileUtils.cp Dir[File.join(ROOT, "doc", "*.rb")], File.join(root, "doc")
 
       say "gem #{platform}  (#{abis.size} abi: #{abis.join(', ')})"
       # The gemspec globs `lib/**/*` relative to its own directory, so `gem
