@@ -1,10 +1,10 @@
 name: package
 
-# Builds libzip_ruby for every (platform, Ruby ABI) pair and wraps each platform
-# into a gem.  Nothing but Zig is needed for the Linux targets: Zig cross-
-# compiles all four from one runner, and the two Darwin platforms from one macOS
-# runner.  The matrix itself comes from `script/package matrix`, so the target
-# list lives in exactly one place.
+# Builds libzip_ruby for each (platform, Ruby ABI) combination and wraps each
+# platform into a gem.  Only Zig is needed for the Linux targets: Zig cross-
+# compiles all 4 from one runner, and the 2 Darwin platforms from one macOS
+# runner.  The matrix comes from `script/package matrix`, so the target
+# list is defined in a single place.
 on:
   push:
     tags: ["v*"]
@@ -60,8 +60,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # mise.toml is the single source of truth for the Zig version.  It says
-      # `zig = "master"` today, which floats; pin an exact `0.17.0-dev.<n>`
+      # mise.toml is the single source of truth for the Zig version.  It reports
+      # `zig = "master"` right now, which floats; pin an exact `0.17.0-dev.<n>`
       # build when you want CI to be reproducible over time.
       - uses: jdx/mise-action@v2
       - uses: ruby/setup-ruby@v1
@@ -85,7 +85,7 @@ jobs:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.matrix.outputs.gem) }}
-    # `gem build` only reads a gemspec, and the platform comes from an env var,
+    # `gem build` only looks at a gemspec, and the platform comes from an env var,
     # so any machine can assemble any platform's gem.
     runs-on: ubuntu-24.04
     steps:
@@ -125,7 +125,7 @@ jobs:
         with:
           files: dist/*.gem
 
-      # Swap in `rubygems/release-gem@v1` if you would rather use RubyGems
+      # Swap in `rubygems/release-gem@v1` if you would prefer RubyGems
       # trusted publishing (OIDC) than a long-lived API key.
       - name: Push to RubyGems
         env:

@@ -12,17 +12,17 @@ pub fn build(b: *std.Build) void {
         @panic(@errorName(err));
     };
 
-    // Zig's translate-c preprocessor (aro) mishandles a directive line whose
-    // only payload is a complete block comment (`# /* ... */`).  It swallows
+    // Zig's translate-c preprocessor (aro) mishandles a directive line with
+    // a complete block comment as the only payload (`# /* ... */`).  It eats
     // the following line, which throws the `#if`/`#endif` stack out of balance
     // and makes ruby.h fail to translate.  Ruby's headers use that style a lot,
-    // so translate against a copy with those lines removed.
+    // so translate using a copy with those lines removed.
     const headers = b.addWriteFiles();
     const hdr = sanitizeHeaders(b, headers, rubyhdrdir, "hdr");
     const archhdr = sanitizeHeaders(b, headers, rubyarchhdrdir, "archhdr");
 
-    // Vendored libzip + zlib, fetched by the package manager and statically
-    // digested into the extension, so the gem depends on nothing at runtime.
+    // Bundled libzip + zlib, fetched by the package manager and statically
+    // digested into the extension, so the gem needs no runtime dependency.
     const zlib_dep = b.dependency("zlib", .{ .target = target, .optimize = optimize });
     const libzip_dep = b.dependency("libzip", .{ .target = target, .optimize = optimize });
     const mbedtls_dep = b.dependency("mbedtls", .{ .target = target, .optimize = optimize });
@@ -37,13 +37,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    // TranslateC keeps its own include-path list (it is not a Compile step, so
+    // TranslateC keeps a separate include-path list (it isn't a Compile step, so
     // there is no `root_module` here); the paths are searched in call order.
     translate_c.addIncludePath(hdr);
     translate_c.addIncludePath(archhdr);
-    // Our hand-written zipconf.h/config.h must win over the dependency's copies,
+    // The zipconf.h/config.h we wrote must win over the dependency's copies,
     // and both must win over any system libzip: the headers c.h translates
-    // against have to be the ones we statically link.  Note we deliberately do
+    // with have to be the ones we statically link.  Note we do
     // NOT linkSystemLibrary("zip") any more.
     translate_c.addIncludePath(b.path("vendor/libzip"));
     translate_c.addIncludePath(libzip_dep.path("lib"));
@@ -63,10 +63,10 @@ pub fn build(b: *std.Build) void {
         }},
     });
 
-    // libzip-ruby.gemspec owns the version: it is what `gem build` stamps into
+    // libzip-ruby.gemspec defines the version: it's what `gem build` writes into
     // the .gem and what script/package tags a release with.  We read it once
     // here and hand it to Zig as a generated import, so LibZip::VERSION (see
-    // src/root.zig) cannot drift from it.
+    // src/root.zig) can't differ from it.
     const build_options = b.addOptions();
     build_options.addOption([:0]const u8, "version", gemVersion(b));
     mod.addOptions("build_options", build_options);
@@ -81,7 +81,7 @@ pub fn build(b: *std.Build) void {
     lib.root_module.linkLibrary(libzip_static);
 
     if (target.result.os.tag == .macos) {
-        // On Darwin a Ruby extension is a Mach-O bundle whose rb_* references
+        // On Darwin a Ruby extension is a Mach-O bundle with rb_* references
         // are resolved when the interpreter dlopen()s it, which ld64 only
         // permits with `-undefined dynamic_lookup`.  Linux allows undefined
         // symbols in a shared object by default, hence the branch.
@@ -91,7 +91,7 @@ pub fn build(b: *std.Build) void {
     // Installed into the prefix when running `zig build` (default `zig-out/`).
     b.installArtifact(lib);
 
-    // The Zig tests deliberately do not link Ruby: src/tests.zig only imports
+    // The Zig tests don't link Ruby, on purpose: src/tests.zig only imports
     // the pure-logic modules, so the test binary needs no interpreter symbols.
     const tests_mod = b.createModule(.{
         .root_source_file = b.path("src/tests.zig"),
@@ -116,7 +116,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&ruby_tests.step);
 }
 
-/// zlib's own sources, so libzip never has to resolve a `-lz` at runtime.
+/// zlib's sources, so libzip has no `-lz` to resolve at runtime.
 const zlib_sources = [_][]const u8{
     "adler32.c",  "compress.c", "crc32.c",   "deflate.c", "gzclose.c",
     "gzlib.c",    "gzread.c",   "gzwrite.c", "inflate.c", "infback.c",
@@ -144,7 +144,7 @@ fn addZlib(
         // gz*.c call read()/write()/close() directly.  Without this they fail
         // with "call to undeclared function".
         // -fvisibility=hidden keeps adler32/crc32/inflate out of the dynamic
-        // symbol table: they are private to this .so, not a zlib re-export.
+        // symbol table: they're private to this .so, not a zlib re-export.
         .flags = &.{ "-DHAVE_UNISTD_H=1", "-fvisibility=hidden" },
     });
 
@@ -176,11 +176,11 @@ fn addLibZip(
     mod.addIncludePath(mbedtls_dep.path("include"));
     mod.addCMacro("HAVE_CRYPTO", "1");
     mod.addCMacro("HAVE_MBEDTLS", "1");
-    // libzip includes <zlib.h>.  On a native build clang silently finds the
+    // libzip includes <zlib.h>.  On a native build clang will cheerfully find the
     // *system* one via the host include dirs; cross targets have no system
-    // zlib, and linkLibrary() does not propagate include dirs to a dependent's
-    // C compilation.  Point at the exactly-matching vendored header instead so
-    // native and cross builds compile against the same zlib.
+    // zlib, and linkLibrary() doesn't propagate include dirs to a dependent's
+    // C compilation.  Point at the exact matching bundled header instead so
+    // native and cross builds compile with the same zlib.
     mod.addIncludePath(zlib_dep.path(""));
     mod.addCSourceFiles(.{
         .root = dep.path("lib"),
@@ -193,12 +193,12 @@ fn addLibZip(
     });
 
     // libzip's error strings live in zip_err_str.c, which is *generated* by
-    // CMake (cmake/GenerateZipErrorStrings.cmake) and therefore absent from the
+    // CMake (cmake/GenerateZipErrorStrings.cmake) and therefore missing from the
     // release tarball.  Without it the link fails on _zip_err_str /
-    // _zip_err_details.  It is derived from the `/* <type> <description> */`
+    // _zip_err_details.  It's derived from the `/* <type> <description> */`
     // comments on ZIP_ER_* in zip.h and ZIP_ER_DETAIL_* in zipint.h, so we
-    // regenerate it as a build step -- LazyPath.getPath() is gone, so dependency
-    // files can no longer be read at configure time.
+    // regenerate it as a build step -- LazyPath.getPath() has been removed, so
+    // dependency files can no longer be read at configure time.
     const gen = b.addExecutable(.{
         .name = "gen-zip-err-str",
         .root_module = b.createModule(.{
@@ -219,7 +219,7 @@ fn addLibZip(
     return b.addLibrary(.{ .name = "zip", .linkage = .static, .root_module = mod });
 }
 
-/// From lib/CMakeLists.txt, with the three AES sources enabled.
+/// From lib/CMakeLists.txt, with the 3 AES sources enabled.
 /// Excluded: bzip2, lzma and zstd.
 const libzip_sources = [_][]const u8{
     "zip_add.c",                          "zip_add_dir.c",                      "zip_add_entry.c",                  "zip_algorithm_deflate.c",             "zip_buffer.c",
@@ -248,8 +248,8 @@ const libzip_sources = [_][]const u8{
     "zip_source_winzip_aes_decode.c",     "zip_source_winzip_aes_encode.c",
 };
 
-/// Copy every header under `dir_path` into `wf` beneath `prefix`, dropping the
-/// preprocessor lines that aro cannot handle.  Returns the include path.
+/// Copy each header under `dir_path` into `wf` beneath `prefix`, removing the
+/// preprocessor lines that aro can't handle.  Returns the include path.
 fn sanitizeHeaders(
     b: *std.Build,
     wf: *std.Build.Step.WriteFile,
@@ -283,8 +283,8 @@ fn sanitizeHeaders(
     return wf.getDirectory().path(b, prefix);
 }
 
-/// Remove lines of the form `# /* ... */` -- a null directive carrying nothing
-/// but one complete block comment.  Every other line is kept verbatim, so line
+/// Remove lines of the form `# /* ... */` -- a null directive with only one
+/// complete block comment.  All other lines are kept as-is, so line
 /// counts shift but no code changes.
 fn stripCommentOnlyDirectives(gpa: std.mem.Allocator, source: []const u8) []const u8 {
     var out = std.ArrayList(u8).initCapacity(gpa, source.len) catch @panic("OOM");
@@ -307,16 +307,16 @@ fn isCommentOnlyDirective(line: []const u8) bool {
     const body = std.mem.trimStart(u8, trimmed[1..], " \t");
     if (!std.mem.startsWith(u8, body, "/*")) return false;
 
-    // Block comments do not nest, so the first `*/` closes it.  Only drop the
+    // Block comments don't nest, so the first `*/` closes it.  Only remove the
     // line when that close is the end of the line; an unterminated comment
-    // continues onto later lines and must be left alone.
+    // continues on later lines and must be left as it is.
     const end = std.mem.indexOf(u8, body[2..], "*/") orelse return false;
     return 2 + end + 2 == body.len;
 }
 
-// Ask RubyGems for the gemspec's version rather than grepping the file: the
+// Ask RubyGems for the gemspec's version instead of searching the file: the
 // gemspec is a Ruby program, and Gem::Specification.load is the only reader
-// guaranteed to see what `gem build` sees.  `ruby` is already a build
+// guaranteed to match what `gem build` uses.  `ruby` is already a build
 // dependency (ruby_config below), so this adds no new requirement.
 fn gemVersion(b: *std.Build) [:0]const u8 {
     const result = std.process.run(b.allocator, b.graph.io, .{ .argv = &.{

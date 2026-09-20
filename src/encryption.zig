@@ -25,8 +25,11 @@ fn getSymbol(value: c.VALUE) [*:0]const u8 {
         c.rb_raise(errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .invalid_argument))], "encryption must be a Symbol");
     }
 
-    const string = c.rb_sym2str(value);
-    return @ptrCast(c.RSTRING_PTR(string));
+    // Points into the pinned symbol table. RSTRING_PTR(rb_sym2str(value))
+    // would point into a String no one keeps past this return.
+    return c.rb_id2name(c.rb_sym2id(value)) orelse {
+        c.rb_raise(errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .invalid_argument))], "encryption must be a named Symbol");
+    };
 }
 
 fn parseMethod(value: c.VALUE) Method {

@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Memory-safety check for the extension.
+#
+# The gem is built -Doptimize=ReleaseFast, which disables Zig's implicit checks:
+# an out-of-range cast or an overflow becomes undefined behaviour instead of a
+# panic. Safety has to come from explicit checks in the source, and this script
+# confirms they're present and working.
+#
+#   1. no unchecked truncating casts on archive data outside src/cast.zig
+#   2. the suite passes at Debug and ReleaseSafe, where Zig *would* catch a cast
+#      we missed, and at ReleaseFast, which is what users actually run
+#   3. valgrind finds no definite leaks and no invalid accesses
+#
+# Usage: script/check [--no-valgrind]
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+run_valgrind=1
+[[ "${1:-}" == "--no-valgrind" ]] && run_valgrind=0
+
+fail() { printf '\n\033[31mFAIL\033[0m %s\n' "$1" >&2; exit 1; }
+step() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
+
+# --- 1. each truncating cast on archive data goes through src/cast.zig ------
+# The files below handle values taken from a zip file. src/cast.zig contains
+# the range check; an unchecked cast in them is a missing check. (The single cast
+# in src/encryption.zig applies to a constant we pass ourselves, not to archive
+# data.)
+step "checking for unguarded narrowing casts"
+guarded="src/archive.zig src/entry.zig src/input_stream.zig src/output_stream.zig"
+# shellcheck disable=SC2086
+if grep -n "@intCast\|@truncate" $guarded; then
+    fail "bare @intCast/@truncate above: route it through src/cast.zig"
+fi
+echo "none found"
+
+# --- 2. the suite, at each optimize mode -----------------------------------
+for mode in Debug ReleaseSafe ReleaseFast; do
+    step "zig build test -Doptimize=$mode"
+    zig build test "-Doptimize=$mode" || fail "suite failed at $mode"
+done
+
+# --- 3. leaks and invalid accesses -----------------------------------------
+if [[ $run_valgrind -eq 1 ]]; then
+    if ! command -v valgrind >/dev/null; then
+        echo "valgrind not installed, skipping" >&2
+    else
+        step "valgrind (Debug build)"
+        zig build "-Doptimize=Debug"
+        # RUBY_FREE_AT_EXIT forces each dfree to run at shutdown, which is the
+        # teardown ordering the stream and archive lifetimes depend on.
+        #
+        # Ruby's conservative GC scans dead stack slots by design, so valgrind
+        # always reports thousands of invalid memory accesses from the
+        # interpreter, plus "possibly lost" noise. The signal we want is the
+        # leak summary,
+        # not the exit code.
+        log=$(mktemp)
+        RUBY_FREE_AT_EXIT=1 valgrind \
+            --leak-check=full \
+            --show-leak-kinds=definite \
+            --errors-for-leak-kinds=definite \
+            ruby -Izig-out/lib -Itest \
+            -e "Dir.glob('test/**/*_test.rb').each { |f| require File.expand_path(f) }" \
+            2>&1 | tee "$log"
+
+        grep -q "0 failures, 0 errors" "$log" || fail "suite failed under valgrind"
+        if ! grep -q "definitely lost: 0 bytes in 0 blocks" "$log"; then
+            grep -B2 -A12 "definitely lost" "$log" >&2 || true
+            fail "valgrind found definitely-lost blocks"
+        fi
+        echo "no definitely-lost blocks"
+        rm -f "$log"
+    fi
+fi
+
+printf '\n\033[32mOK\033[0m all memory-safety checks passed\n'

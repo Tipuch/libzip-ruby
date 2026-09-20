@@ -1,0 +1,30 @@
+name: check
+
+# The gem is built -Doptimize=ReleaseFast, which disables Zig's implicit safety
+# checks. This confirms the explicit ones do the job.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        ruby: ["3.3", "3.4", "4.0"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.17.0-dev.2085+5e36170b5
+      - run: sudo apt-get update && sudo apt-get install -y valgrind
+      - run: script/check

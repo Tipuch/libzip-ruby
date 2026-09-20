@@ -2,10 +2,10 @@ require_relative "helper"
 require "tmpdir"
 require "zlib"
 
-# The Ruby-level tests cannot tell *which* rule decided `directory?` (the
-# trailing-slash rule fires first on `docs/`). The per-rule coverage lives in
+# The Ruby-level tests can't tell *which* rule decided `directory?` (the
+# trailing-slash rule applies first on `docs/`). The per-rule coverage is in
 # the Zig unit tests for nameIsDirectory / attributesAreDirectory.
-# ENTRIES_ZIP itself is defined in helper.rb.
+# ENTRIES_ZIP is defined in helper.rb.
 
 class EntryTest < Minitest::Test
   NAMES = ["b.txt", "app.rb", "café.txt", "docs/", "docs/a.txt"].freeze
@@ -114,8 +114,8 @@ class EntryTest < Minitest::Test
 
   def test_include_is_an_exact_match
     # Decision, pinned: we look the stored name up as-is. rubyzip keys on
-    # name.chomp("/"), so its include?("docs") is true; ours is not. Documented
-    # divergence, not an oversight.
+    # name.chomp("/"), so the rubyzip include?("docs") is true; this one isn't.
+    # A documented difference, not an oversight.
     assert @zip.include?("docs/")
     refute @zip.include?("docs")
   end
@@ -143,7 +143,7 @@ class EntryTest < Minitest::Test
   end
 
   def test_glob_star_respects_path_separators
-    # FNM_PATHNAME: `*` does not cross a `/`, so docs/a.txt is excluded.
+    # FNM_PATHNAME: `*` doesn't cross a `/`, so docs/a.txt is excluded.
     assert_equal ["b.txt", "café.txt"], @zip.glob("*.txt").map(&:name)
     assert_equal ["docs/a.txt"], @zip.glob("docs/*").map(&:name)
   end
@@ -176,7 +176,7 @@ class EntryTest < Minitest::Test
 
   def test_entries_survive_close
     # Entries are a snapshot taken out of the central directory, so their
-    # metadata stays valid after the archive is gone.
+    # metadata remains valid after the archive is closed.
     entry = @zip.find_entry("app.rb")
     @zip.close
     assert_equal "app.rb", entry.name
@@ -196,7 +196,7 @@ class EntryTest < Minitest::Test
     assert_equal first.map(&:name), second.map(&:name)
   end
 
-  # A zip with zero entries is a bare end-of-central-directory record: the
+  # A zip with zero entries is just an end-of-central-directory record: the
   # 4-byte signature "PK\x05\x06" plus 18 zero bytes (spec 4.3.22).
   def test_empty_archive
     path = File.join(@dir, "empty.zip")
@@ -210,10 +210,11 @@ class EntryTest < Minitest::Test
   end
 
   def test_create_then_close_with_no_writes_creates_no_file
-    # libzip deliberately refuses to write archives with no entries
-    # (zip_close.c:65): closing discards instead of creating the file. The knob
-    # to opt in is ZIP_AFL_CREATE_OR_KEEP_FILE_FOR_EMPTY_ARCHIVE, which we do
-    # not set. Worth knowing rather than being surprised by.
+    # libzip won't write archives with no entries, on purpose
+    # (zip_close.c:65): closing throws the archive away instead of creating
+    # the file. The setting to opt in is
+    # ZIP_AFL_CREATE_OR_KEEP_FILE_FOR_EMPTY_ARCHIVE, which we don't set.
+    # Useful to know, instead of a surprise later.
     path = File.join(@dir, "untouched.zip")
     LibZip::File.open(path, create: true) { |zip| assert_equal 0, zip.size }
     refute File.exist?(path), "empty archive was written to disk"

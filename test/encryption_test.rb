@@ -7,9 +7,9 @@ require "tmpdir"
 #
 # Our writer produces the AES fixtures for the read paths (the binding is the
 # only AES writer on this machine). Cross-tool coverage uses 7-Zip when it is
-# installed: it is the only external writer here that can emit AES (`-mem=AES256`)
+# installed: it's the only external writer here that can emit AES (`-mem=AES256`)
 # as well as traditional ZipCrypto (`-mem=ZipCrypto`). AES-128/192 fixtures from
-# an external tool are not available; 7-Zip's zip handler only writes AES-256.
+# an external tool aren't available; 7-Zip's zip handler only writes AES-256.
 class EncryptionTest < Minitest::Test
     SEVEN_ZIP = "/usr/bin/7z"
     PASSWORD = "correct horse battery staple"
@@ -92,7 +92,7 @@ class EncryptionTest < Minitest::Test
         assert_reads_with("data.bin", PASSWORD)
     end
 
-    # Neither a per-entry password nor an archive default: libzip rejects the
+    # With no per-entry password and no archive default, libzip turns away the
     # entry while the archive is being closed.
     def test_encrypting_without_any_password_raises
         assert_raises(LibZip::InvalidArgumentError) do

@@ -3,14 +3,14 @@
 Ruby bindings for [libzip](https://libzip.org), the C library for reading and
 writing zip archives.
 
-- **Nothing to compile.** libzip and zlib are statically linked into the
-  extension and shipped precompiled per platform, so `gem install` never calls a
+- **No compile step.** libzip and zlib are statically linked into the
+  extension and published precompiled per platform, so `gem install` calls no
   C toolchain.
 - **No runtime dependencies.** No system libzip, no zlib, no OpenSSL needed.
-  The bundled libzip symbols are hidden, so it also coexists happily with a
+  The bundled libzip symbols are hidden, so it runs alongside a
   system libzip or with rubyzip.
-- **Familiar shape.** `LibZip::File.open` / `#add` / `#get_output_stream` /
-  `#read` - rubyzip's method names, under our own `LibZip` namespace.
+- **Familiar surface.** `LibZip::File.open` / `#add` / `#get_output_stream` /
+  `#read` - rubyzip's method names, under the `LibZip` namespace.
 - **Encryption included.** AES-128/192/256 reading and writing, plus read-only
   ZipCrypto, with the crypto performed by a statically linked mbedTLS.
 
@@ -42,25 +42,6 @@ Precompiled extensions are published for these platforms:
 | `x86_64-linux`, `aarch64-linux` | glibc |
 | `x86_64-linux-musl`, `aarch64-linux-musl` | Alpine and other musl systems |
 | `x86_64-darwin`, `arm64-darwin` | macOS, Intel and Apple silicon |
-
-Each gem carries one extension per Ruby ABI (3.3, 3.4, 4.0) and picks the right
-one at load time, so a single gem serves every patch release of those lines.
-
-### Requiring
-
-```ruby
-require "libzip-ruby"  # ← what Bundler auto-requires; sets up everything
-require "libzip_ruby"  # the bare extension: LibZip::*
-require "libzip"       # the entry point: ABI loader + the extension
-```
-
-All three load the same extension, and everything they define lives under the
-`LibZip` namespace: there is no top-level `Zip` constant. That is deliberate -
-rubyzip already owns `Zip`, and we would rather not define a second, smaller
-copy of it that a transitive `require "zip"` might pick up by accident.
-
-> **If rubyzip is also in your bundle,** `require "zip"` is unambiguously rubyzip and
-> `require "libzip"` is unambiguously this gem. The two coexist in one process.
 
 ## Quick start
 
@@ -98,8 +79,8 @@ zip.read("greeting.txt")  #=> "Hello, world!\nwritten by libzip"
 zip.close
 ```
 
-Nothing here needs `unzip` to be installed. The archives are ordinary zip
-files, so `unzip -l archive.zip` sees exactly what you wrote.
+No `unzip` installation is needed here. The archives are plain zip
+files, so `unzip -l archive.zip` shows the exact bytes you wrote.
 
 ## Working with `LibZip::File`
 
@@ -110,14 +91,14 @@ LibZip::File.open("archive.zip")                  # read an existing archive
 LibZip::File.open("archive.zip", create: true)    # create it if it does not exist
 ```
 
-`create: true` is a no-op when the file already exists (it does not truncate),
-so it is safe to use whenever you intend to write. Opening a path that does not
-exist without it raises `LibZip::NotFoundError`.
+`create: true` has no effect when the file already exists (it doesn't truncate),
+so it's safe to use whenever you intend to write. Opening a path that doesn't
+exist without it gives `LibZip::NotFoundError`.
 
 ### Block form
 
 Both `File.open` and `get_output_stream` take a block, and both have the same
-two guarantees:
+2 guarantees:
 
 ```ruby
 result = LibZip::File.open("archive.zip", create: true) do |zip|
@@ -129,12 +110,12 @@ result  #=> :whatever_the_block_returns
 
 - On normal exit the archive is closed and **committed**; the block's value is
   returned from `open`.
-- If the block raises, the archive is **discarded**: the half-written file is
-  removed and the exception propagates. You never leave a truncated zip behind.
+- If the block fails, the archive is **thrown away**: the half-written file is
+  removed and the exception propagates. No truncated zip is left behind.
 
 The same contract applies per entry with `get_output_stream`: if the block
-raises, that entry is not added, while entries written earlier (and already
-committed) stay.
+fails, that entry isn't added, while entries written earlier (and already
+committed) remain.
 
 ```ruby
 LibZip::File.open("archive.zip", create: true) do |zip|
@@ -154,7 +135,7 @@ end
 
 ### Manual `close`
 
-Without a block you own the lifecycle:
+Without a block you control the lifecycle:
 
 ```ruby
 zip = LibZip::File.open("archive.zip", create: true)
@@ -164,9 +145,9 @@ zip.close    # writes the central directory, flushes to disk
 zip.closed?  #=> true
 ```
 
-`close` on an already closed archive raises `LibZip::EntryError`, and using a
-closed archive raises the same thing, so a double `close` is a loud bug rather
-than a silent one.
+`close` on an already closed archive gives `LibZip::EntryError`, and using a
+closed archive gives the same thing, so a double `close` is a visible bug, not
+a quiet one.
 
 ### Adding entries
 
@@ -174,7 +155,7 @@ than a silent one.
 zip.add(entry_name, source_path)
 ```
 
-`add` reads `source_path` from disk when the archive is written, and returns the
+`add` loads `source_path` from disk when the archive is written, and returns the
 archive, so calls chain:
 
 ```ruby
@@ -183,8 +164,8 @@ LibZip::File.open("archive.zip", create: true) do |zip|
 end
 ```
 
-The source must be a regular file: a missing path raises
-`LibZip::NotFoundError`, a directory raises `LibZip::InvalidArgumentError`.
+The source must be a regular file: a missing path gives
+`LibZip::NotFoundError`, a directory gives `LibZip::InvalidArgumentError`.
 
 ### Writing entries from memory
 
@@ -197,9 +178,9 @@ out.close                #=> commits the entry
 zip.close
 ```
 
-A stream buffers in memory and is only added to the archive when it is closed
-(or when its block returns), so a stream you never close, including one left to
-the garbage collector is simply dropped.
+A stream buffers in memory and is only added to the archive when it's closed
+(or when the block returns), so a stream you leave open, including one passed to
+the garbage collector, is thrown away.
 
 ### Reading entries
 
@@ -207,13 +188,13 @@ the garbage collector is simply dropped.
 zip.read("greeting.txt")
 ```
 
-Returns the entry's bytes as an `ASCII-8BIT` string. Reading an entry that is not
-in the archive raises `LibZip::NotFoundError`.
+Returns the entry's bytes as an `ASCII-8BIT` string. Reading an entry that isn't
+in the archive gives `LibZip::NotFoundError`.
 
 ### Listing entries
 
-Nothing is extracted and no entry bytes are read: every `LibZip::Entry` is a
-snapshot taken straight out of the central directory.
+No extraction happens and no entry bytes are read: each `LibZip::Entry` is a
+snapshot taken directly out of the central directory.
 
 ```ruby
 LibZip::File.open("archive.zip") do |zip|
@@ -231,7 +212,7 @@ LibZip::File.open("archive.zip") do |zip|
 end
 ```
 
-What an entry knows:
+What an entry records:
 
 ```ruby
 entry = zip["docs/a.txt"]
@@ -247,11 +228,11 @@ entry.index                # => 1, the entry's position in the archive
 entry.to_s                 # => "docs/a.txt"
 ```
 
-Entries are snapshots, so their metadata stays readable after the archive is
-closed; using the `File` itself afterwards raises `LibZip::EntryError`.
+Entries are snapshots, so their metadata remains readable after the archive is
+closed; using the `File` after that gives `LibZip::EntryError`.
 
 `#glob` matches entry names with `File.fnmatch?` semantics; `*` doesn't cross
-a `/`, and directory entries match without the trailing slash they are stored
+a `/`, and directory entries match without the trailing slash they're stored
 with:
 
 ```ruby
@@ -261,7 +242,7 @@ zip.glob("docs")      # => the "docs/" entry itself
 zip.glob("**/*.rb") { |entry| entry.name }   # also yields each match
 ```
 
-Matching is case-sensitive on every platform, unlike `Dir.glob` on macOS.
+Matching is case-sensitive on each platform, unlike `Dir.glob` on macOS.
 `*`, `?`, `[...]` and `{a,b}` all work; `**` matches zero or more directories.
 
 ### Deleting entries
@@ -273,29 +254,29 @@ removed.name                          # => "old.txt"
 removed.size                          # still readable after zip.close
 ```
 
-`remove` returns the entry that went away, a snapshot taken before the
-deletion, so its metadata stays readable afterwards. If the name is not in the
-archive it raises `LibZip::NotFoundError`, and so does a second `remove` of the
-same name. There is no third outcome: you get the entry back, or you get an
+`remove` returns the entry it deleted, a snapshot taken before the
+deletion, so the metadata remains readable after that. If the name isn't in the
+archive you get `LibZip::NotFoundError`, and so does a second `remove` of the
+same name. There is no other outcome: you get the entry back, or you get an
 exception.
 
 Like `add`, removal is marked immediately and written when the archive is
 closed; closing commits, and there's no `discard`. Inside the block form, a block
-that raises leaves the archive on disk untouched. Removing the only remaining
-entry leaves an empty archive, and libzip refuses to write those: the file is
-removed from disk instead of being rewritten with an empty directory.
+that fails keeps the archive on disk as it was. Removing the only remaining
+entry would produce an empty archive, and libzip won't write those: the file is
+removed from disk instead of being written again with an empty directory.
 
 ### Overwriting
 
 `add` and `get_output_stream` both pass `ZIP_FL_OVERWRITE`, so writing the same
-entry name twice replaces the first copy instead of raising
-`LibZip::AlreadyExistsError`. That is what makes the "drop a file into an
+entry name a second time replaces the first copy instead of raising
+`LibZip::AlreadyExistsError`. That's what makes the "drop a file into an
 existing archive" pattern above work.
 
 ## Reading entries as a stream
 
-`read` loads the whole entry into a String. `get_input_stream` hands you the
-entry as a stream instead, so memory stays flat no matter how big the entry is:
+`read` loads the entire entry into a String. `get_input_stream` gives you the
+entry as a stream instead, so memory remains flat no matter how big the entry is:
 
 ```ruby
 LibZip::File.open("archive.zip") do |zip|
@@ -309,7 +290,7 @@ LibZip::File.open("archive.zip") do |zip|
 end
 ```
 
-The block form closes the stream on the way out, including when the block raises:
+The block form closes the stream on the way out, including when the block fails:
 
 ```ruby
 LibZip::File.open("archive.zip") do |zip|
@@ -318,17 +299,6 @@ LibZip::File.open("archive.zip") do |zip|
   end
 end
 ```
-
-Two things worth knowing, and both of them bite:
-
-- **Integrity is checked at the end of the entry.** libzip compares the CRC (or,
-  for AES entries, the HMAC) only once the entry has been read to the end, so a
-  truncated or tampered entry raises `LibZip::DecompressionError` from the read
-  that reaches EOF, not from the reads before it. Reading an entry halfway
-  verifies nothing; call `stream.read` until `eof?` when you care.
-- **Closing an archive closes its streams.** `File#close` closes every open
-  `InputStream` first, so libzip never sees a live file handle on a discarded
-  archive. Using a stream after that raises `LibZip::EntryError`.
 
 ## Encryption
 
@@ -350,8 +320,7 @@ end
 ```
 
 Accepted values are `:aes128`, `:aes192`, `:aes256`, `:none` and `nil`.
-`:pkware` is rejected for writing: libzip documents ZipCrypto as broken, and
-exposing it would make the insecure choice as easy as the secure one.
+`:pkware` is turned away for writing: libzip documents ZipCrypto as broken.
 
 **Reading.** The password can come from the archive, from the call, or from
 `File#password=`:
@@ -376,28 +345,25 @@ LibZip::File.open("secrets.zip") do |zip|
 end
 ```
 
-An explicit `password:` wins over the archive default, so a wrong per-call
-password fails even when the archive was opened with the right one.
-
-**Details that surprise people:**
+An explicit `password:` overrides the archive default, so a bad password on
+the call fails even when the archive was opened with the right one.
 
 - Encryption is **per entry**. One archive can mix plain, AES-128 and ZipCrypto
-  entries, each with its own password; `File.open(password:)` only sets a
-  default that every read falls back to.
+  entries, each with a separate password; `File.open(password:)` only sets a
+  default that each read falls back to.
 - `nil` or `""` means "use the archive default"; it doesn't mean "empty
   password".
-- A password without `encryption:` on a write raises
-  `LibZip::InvalidArgumentError`, as does encrypting with no password anywhere
-  (neither per entry nor archive default).
-- Missing or wrong passwords raise `LibZip::PasswordError` when the entry is
+- A password without `encryption:` on a write gives
+  `LibZip::InvalidArgumentError`, as does encrypting with no password at all
+  (not per entry, not as an archive default).
+- Missing or incorrect passwords give `LibZip::PasswordError` when the entry is
   read, not when the archive is opened.
-- **Names, comments and the central directory are not encrypted.** Zip
+- **Names, comments and the central directory remain unencrypted.** Zip
   encryption protects entry contents only; anyone can list what is inside.
 - AES entries use AE-2, which stores no CRC, so the HMAC is the only integrity
   check for them and `Entry#crc` may be `0`. Tampering surfaces as
   `LibZip::DecompressionError` when the entry is read to the end.
-- Crypto is mbedTLS 3.6, statically linked like libzip and zlib. There is no
-  OpenSSL or system mbedTLS dependency.
+- Crypto is using mbedTLS 3.6, statically linked like libzip and zlib.
 
 ## API reference
 
@@ -408,7 +374,7 @@ password fails even when the archive was opened with the right one.
 | `File.open(path, create: false, password: nil) { \|zip\| }` | block form closes the archive |
 | `#close`, `#closed?` | closes live input streams first |
 | `#password=` | archive default password; `nil` clears it |
-| `#read(name, password: nil)` | whole entry, as a String |
+| `#read(name, password: nil)` | entire entry, as a String |
 | `#get_input_stream(name, password: nil) { \|stream\| }` | streamed read |
 | `#add(name, source_path, encryption: nil, password: nil)` | copies a file from disk |
 | `#get_output_stream(name, encryption: nil, password: nil) { \|out\| }` | writes from memory |
@@ -419,8 +385,8 @@ password fails even when the archive was opened with the right one.
 | `#entries`, `#each`, `#each_entry` | snapshots of the central directory |
 | `#names`, `#size`, `#length` | entry names, entry count |
 | `#include?`, `#find_entry`, `#[]` | lookup, `nil` when missing |
-| `#get_entry(name)` | lookup that raises `LibZip::NotFoundError` |
-| `#glob(pattern)` | entries whose name matches a pattern |
+| `#get_entry(name)` | lookup; a missing entry → `LibZip::NotFoundError` |
+| `#glob(pattern)` | entries with a name matching a pattern |
 
 `LibZip::Entry`: one central-directory record.
 
@@ -435,8 +401,11 @@ password fails even when the archive was opened with the right one.
 | `#directory?` | entry is a directory |
 | `#comment`, `#to_s`, `#inspect` | per-entry comment and formatting |
 
-`LibZip::Entry` also carries the numeric encryption constants, so metadata can
-be checked without guessing: `NONE`, `TRAD_PKWARE`, `AES_128`, `AES_192`,
+Each accessor above except `#name`, `#index` and `#directory?` returns `nil`
+when the archive did not record that field. `#encrypted?` returns `false` in that case.
+
+`LibZip::Entry` also defines the numeric encryption constants, so metadata can
+be checked without guesswork: `NONE`, `TRAD_PKWARE`, `AES_128`, `AES_192`,
 `AES_256`.
 
 `LibZip::InputStream`: `#read([length])`, `#eof?`, `#closed?`, `#close`.
@@ -445,8 +414,8 @@ be checked without guessing: `NONE`, `TRAD_PKWARE`, `AES_128`, `AES_192`,
 
 ## Errors
 
-Everything libzip reports is a `LibZip::Error` (a `StandardError`), mapped onto a
-subclass by what went wrong, so you can rescue precisely:
+Everything libzip reports is a `LibZip::Error` (a `StandardError`), mapped to a
+subclass by the kind of failure, so you can rescue narrowly:
 
 | class | raised for |
 | --- | --- |
@@ -459,9 +428,9 @@ subclass by what went wrong, so you can rescue precisely:
 | `LibZip::CompressionError`, `LibZip::DecompressionError` | unsupported method, CRC mismatch |
 | `LibZip::InvalidArgumentError` | bad argument, e.g. a directory as a source |
 | `LibZip::PermissionError` | read-only archive or disallowed operation |
-| `LibZip::PasswordError` | password missing or wrong |
+| `LibZip::PasswordError` | password missing or incorrect |
 | `LibZip::EntryError` | an entry used after the archive closed, or a stale entry |
-| `LibZip::UnsupportedError` | operation or encryption method libzip cannot do |
+| `LibZip::UnsupportedError` | operation or encryption method libzip can't do |
 | `LibZip::InternalError` | libzip/zlib internal failure, out of memory |
 
 ```ruby
@@ -474,36 +443,17 @@ rescue LibZip::Error => e
 end
 ```
 
-## What is not here yet
-
-This is an early release (`LibZip::VERSION` is `0.1.0`). Known gaps, all
-deliberate rather than accidental:
-
-- **ZipCrypto writing.** Reading it is supported for compatibility; writing it
-  is not exposed.
-- **PKWARE strong encryption** (DES, RC2, RC4, 3DES) is unsupported, as is any
-  other method libzip can't handle; those raise
-  `LibZip::UnsupportedError`.
-- **No seeking.** `InputStream` reads forward only; there is no `#pos`,
-  `#seek` or `#rewind`.
-- **No streaming into an entry.** `OutputStream` buffers in memory until the
-  stream is closed; there is no `zip_fwrite`-style incremental write.
-- **Windows builds.** Linux and macOS are packaged; Windows needs the platform
-  port to `std.posix` first.
-- **Encrypted metadata.** Encryption covers entry contents, not names, comments
-  or the central directory.
-
 ## Under the hood
 
 - libzip 1.11.4, zlib 1.3.2 and mbedTLS 3.6 are pinned in `build.zig.zon` and
   compiled into a single shared object per platform; only libc (and libm)
   remains a runtime dependency.
-- The build is pure Zig (`build.zig`), including the small host program that
-  regenerates libzip's error strings from its headers.
+- The build is Zig only (`build.zig`), including the small host program that
+  regenerates libzip's error strings from the libzip headers.
 - `script/package` builds the platform gems; `.github/workflows/package.yml`
-  drives it in CI.
+  runs it in CI.
 
-To hack on it:
+To contribute to the project:
 
 ```sh
 mise install           # Zig 0.17-dev and Ruby, per mise.toml
@@ -514,9 +464,9 @@ script/package list    # platform matrix, and what this host can build
 
 ## License
 
-Apache License 2.0. The full text sits in `LICENSE`.
+Apache License 2.0. The full text is in `LICENSE`.
 
-The extension links three libraries statically, so their terms travel with the
+The extension links 3 libraries statically, so their terms travel with the
 gem:
 
 - libzip 1.11.4 is BSD 3-Clause.

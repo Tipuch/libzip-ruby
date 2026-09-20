@@ -1,8 +1,9 @@
 const c = @import("c");
 const encryption = @import("encryption.zig");
 const errors = @import("errors.zig");
+const cast = @import("cast.zig");
 
-const BUFFER_SIZE: c.zip_uint64_t = 8 * 1024;
+const BUFFER_SIZE: usize = 8 * 1024;
 
 pub const InputStream = struct {
     archive_rb: c.VALUE,
@@ -12,6 +13,7 @@ pub const InputStream = struct {
     zip_file: ?*c.zip_file_t,
     buffer: [*]u8,
     size: c.zip_uint64_t,
+    size_known: bool,
     position: c.zip_uint64_t,
     eof: bool,
 };
@@ -22,6 +24,11 @@ fn markStream(raw: ?*anyopaque) callconv(.c) void {
     const ptr = raw orelse return;
     const stream: *InputStream = @ptrCast(@alignCast(ptr));
     c.rb_gc_mark(stream.archive_rb);
+}
+
+fn sizeStream(raw: ?*const anyopaque) callconv(.c) usize {
+    if (raw == null) return 0;
+    return @sizeOf(InputStream) + BUFFER_SIZE;
 }
 
 fn freeStream(raw: ?*anyopaque) callconv(.c) void {
@@ -42,7 +49,7 @@ const stream_type: c.rb_data_type_t = .{
     .function = .{
         .dmark = markStream,
         .dfree = freeStream,
-        .dsize = null,
+        .dsize = sizeStream,
     },
     .data = null,
     .flags = c.RUBY_TYPED_FREE_IMMEDIATELY,
@@ -69,6 +76,7 @@ pub fn create(
     head: *?*InputStream,
     name: [*c]const u8,
     size: c.zip_uint64_t,
+    size_known: bool,
     encryption_config: *const encryption.Config,
 ) c.VALUE {
     const maybe_file =
@@ -87,30 +95,34 @@ pub fn create(
             c.zip_error_code_zip(c.zip_get_error(archive)),
         );
     };
-    const raw_buffer = c.ruby_xmalloc(@intCast(BUFFER_SIZE));
+    const raw_buffer = c.ruby_xmalloc(BUFFER_SIZE);
     const buffer: [*]u8 = @ptrCast(raw_buffer);
 
     const stream: *InputStream = @ptrCast(@alignCast(c.ruby_xmalloc(@sizeOf(InputStream))));
 
     stream.* = .{
-        .head = head,
+        .head = null,
         .prev = null,
-        .next = head.*,
+        .next = null,
         .archive_rb = archive_rb,
         .zip_file = zip_file,
         .buffer = buffer,
         .size = size,
+        .size_known = size_known,
         .position = 0,
-        .eof = size == 0,
+        .eof = size_known and size == 0,
     };
-    if (head.*) |first| first.prev = stream;
-    head.* = stream;
 
     const obj = c.TypedData_Wrap_Struct(
         stream_class,
         &stream_type,
         stream,
     );
+
+    stream.head = head;
+    stream.next = head.*;
+    if (head.*) |first| first.prev = stream;
+    head.* = stream;
 
     if (c.rb_block_given_p() != 0) {
         return c.rb_ensure(
@@ -211,13 +223,14 @@ fn appendChunk(
 
     _ = c.rb_str_cat(result, @ptrCast(stream.buffer), amount);
 
-    stream.position += @intCast(amount);
+    const read = cast.readAmount(amount);
+    stream.position += read;
 
-    if (stream.position >= stream.size) {
+    if (stream.size_known and stream.position >= stream.size) {
         stream.eof = true;
     }
 
-    return @intCast(amount);
+    return read;
 }
 
 fn readRequested(stream: *InputStream, request: c.zip_uint64_t) c.VALUE {
@@ -261,11 +274,7 @@ fn readStream(argc: c_int, argv: [*c]c.VALUE, self: c.VALUE) callconv(.c) c.VALU
         c.rb_error_arity(argc, 0, 1);
     }
 
-    const requested = c.NUM2LONG(argv[0]);
-
-    if (requested < 0) {
-        c.rb_raise(c.rb_eArgError, "negative length");
-    }
+    const requested = cast.requestLength(c.NUM2LONG(argv[0]));
 
     if (requested == 0) {
         return c.rb_str_new(null, 0);
@@ -275,5 +284,5 @@ fn readStream(argc: c_int, argv: [*c]c.VALUE, self: c.VALUE) callconv(.c) c.VALU
         return c.Qnil;
     }
 
-    return readRequested(stream, @intCast(requested));
+    return readRequested(stream, requested);
 }

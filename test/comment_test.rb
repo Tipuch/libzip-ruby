@@ -124,7 +124,7 @@ class CommentTest < Minitest::Test
   def test_archive_comment_rejects_embedded_nul
     comment = "before\0after".b
 
-    # zip_set_archive_comment uses libzip's encoding-guess path and rejects
+    # zip_set_archive_comment uses libzip's encoding-guess path and turns away
     # this archive-level comment. Entry comments use the separate file-comment
     # API and are tested for NUL round-tripping below.
     LibZip::File.open(@zip_path) do |zip|

@@ -132,7 +132,12 @@ pub fn raiseCode(raw: c_int) noreturn {
         .err => |kind| error_class_registry[@backingInt(kind)],
         .ok, .unknown => base_error_class,
     };
-    c.rb_exc_raise(c.rb_exc_new_cstr(rb_class, c.zip_error_strerror(&zip_error)));
+    // zip_error_strerror mallocs into zip_error.str and only zip_error_fini
+    // releases it, but rb_exc_raise longjmps past this frame. Build the exception
+    // (which copies the message), free, then raise.
+    const exception = c.rb_exc_new_cstr(rb_class, c.zip_error_strerror(&zip_error));
+    c.zip_error_fini(&zip_error);
+    c.rb_exc_raise(exception);
 }
 
 test "className converts tags to Ruby names" {

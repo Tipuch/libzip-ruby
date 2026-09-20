@@ -6,16 +6,16 @@ require "json"
 
 # `rename` changes the entry's name in place: same index, same content, same
 # metadata, new name. The change is written when the archive is closed. It
-# returns a snapshot of the renamed entry, and snapshots handed out *before* the
-# rename keep the old name — they are snapshots, not handles.
+# returns a snapshot of the renamed entry, and snapshots taken *before* the
+# rename keep the old name — they're snapshots, not handles.
 #
-# Kind (directory-ness) is carried by the trailing slash of the stored name, so
-# a rename that would change it is refused rather than silently producing an
-# entry other tools disagree about.
+# Kind (directory-ness) comes from the trailing slash of the stored name, so
+# a rename that would change it gets turned away, instead of producing
+# an entry other tools would read differently.
 class RenameTest < Minitest::Test
-  # Reads the archive with a foreign tool. The fixture is python-generated
-  # anyway, so python3 is already part of the test story; skip if it is absent
-  # rather than fail.
+  # Checks the archive with a foreign tool. The fixture is python-generated
+  # anyway, so python3 is already part of the test story; skip if it's missing
+  # instead of failing.
   PYTHON = ENV.fetch("PYTHON", "python3")
   PYTHON_SCRIPT = <<~PY
     import json, sys, zipfile
@@ -83,7 +83,7 @@ class RenameTest < Minitest::Test
       stale = zip.find_entry("a.txt")
       renamed = zip.rename(stale, "renamed.txt")
 
-      # snapshots are values, not handles: they do not track the archive
+      # snapshots are values, not handles: they don't track the archive
       assert_equal "a.txt", stale.name
       assert_equal "renamed.txt", renamed.name
     end
@@ -97,7 +97,7 @@ class RenameTest < Minitest::Test
     assert_equal 5, renamed.size
   end
 
-  # --- the change itself ----------------------------------------------------
+  # --- the change ------------------------------------------------------------
 
   def test_rename_is_visible_immediately_and_committed_by_close
     LibZip::File.open(@zip_path) do |zip|
@@ -114,7 +114,7 @@ class RenameTest < Minitest::Test
   end
 
   def test_rename_keeps_the_entry_in_place
-    # zip_file_rename sets a name; it does not move the entry to the end the way
+    # zip_file_rename sets a name; it doesn't move the entry to the end the way
     # remove-then-add does. Order is part of what users see.
     LibZip::File.open(@zip_path) do |zip|
       zip.rename("b.txt", "middle.txt")
@@ -153,7 +153,7 @@ class RenameTest < Minitest::Test
   end
 
   def test_rename_can_change_only_the_case
-    # lookups are case-sensitive everywhere, so this is a real rename, not a no-op
+    # lookups are case-sensitive everywhere, so this is a real rename
     LibZip::File.open(@zip_path) do |zip|
       zip.rename("a.txt", "A.TXT")
 
@@ -177,9 +177,9 @@ class RenameTest < Minitest::Test
   end
 
   def test_unicode_new_name_sets_the_utf8_general_purpose_bit
-    # Bit 11 of the general purpose flag is the archive's own statement that the
-    # name is UTF-8. Our reader would agree with us either way; this asks a
-    # foreign parser what the bytes actually say.
+    # Bit 11 of the general purpose flag is the archive claiming the name is
+    # UTF-8. Our reader would agree with us either way; this checks what a
+    # foreign parser makes of the bytes.
     LibZip::File.open(@zip_path) { |zip| zip.rename("a.txt", "café.txt") }
 
     names = foreign_zip_info(@zip_path)
@@ -216,7 +216,7 @@ class RenameTest < Minitest::Test
     LibZip::File.open(@zip_path) do |zip|
       assert_raises(LibZip::AlreadyExistsError) { zip.rename("a.txt", "b.txt") }
 
-      # neither entry is disturbed
+      # no entry is disturbed
       assert_equal ["a.txt", "b.txt", "keep.txt"], zip.names
       assert_equal "hello", zip.read("a.txt")
       assert_equal "hello", zip.read("b.txt")
@@ -270,7 +270,7 @@ class RenameTest < Minitest::Test
     before = File.binread(zip_path)
 
     LibZip::File.open(zip_path) do |zip|
-      # docs/ carries directory-ness in both the trailing slash and its external
+      # docs/ shows directory-ness in both the trailing slash and the external
       # attributes; a name without the slash would contradict the attributes
       assert_raises(LibZip::InvalidArgumentError) { zip.rename("docs/", "stuff") }
 
@@ -297,7 +297,7 @@ class RenameTest < Minitest::Test
   end
 
   def test_rename_does_not_move_children
-    # No cascading, exactly like rubyzip: the child keeps the old path prefix.
+    # No cascading, just like rubyzip: the child keeps the old path prefix.
     zip_path = foreign_zip
 
     LibZip::File.open(zip_path) do |zip|
@@ -350,7 +350,7 @@ class RenameTest < Minitest::Test
   private
 
   def foreign_zip_info(path) 
-    # Reads the archive with python's zipfile, which shares no code with ours.
+    # Checks the archive with python's zipfile, which shares no code with us.
     out = IO.popen([PYTHON, "-c", PYTHON_SCRIPT, path], &:read)
     unless $?.success?
       skip "#{PYTHON} not available"

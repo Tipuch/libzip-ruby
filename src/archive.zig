@@ -5,20 +5,16 @@ const entry = @import("entry.zig");
 const output_stream = @import("output_stream.zig");
 const input_stream = @import("input_stream.zig");
 const encryption = @import("encryption.zig");
+const cast = @import("cast.zig");
 
-var io_threaded: std.Io.Threaded = undefined;
-var io: std.Io = undefined;
-
-const MAX_COMMENT_LENGTH: u32 = 65_535;
+const READ_BUFFER_SIZE: c.zip_uint64_t = 8 * 1024;
+// An uncompressed size from the archive is attacker-controlled, so it may
+// size the first allocation and no more than that.
+const READ_PREALLOC_CAP: c_long = 4 * 1024 * 1024;
 
 var fnm_pathname: c_int = 0;
 var fnm_dotmatch: c_int = 0;
 var fnm_extglob: c_int = 0;
-
-pub fn initIo() void {
-    io_threaded = std.Io.Threaded.init_single_threaded;
-    io = io_threaded.io();
-}
 
 const File = struct {
     archive: ?*c.zip_t,
@@ -27,10 +23,15 @@ const File = struct {
 
 const file_type: c.rb_data_type_t = .{
     .wrap_struct_name = "LibZip::File",
-    .function = .{ .dmark = null, .dfree = freeArchive, .dsize = null },
+    .function = .{ .dmark = null, .dfree = freeArchive, .dsize = sizeArchive },
     .data = null,
     .flags = c.RUBY_TYPED_FREE_IMMEDIATELY,
 };
+
+fn sizeArchive(archive_ptr: ?*const anyopaque) callconv(.c) usize {
+    if (archive_ptr == null) return 0;
+    return @sizeOf(File);
+}
 
 fn freeArchive(archive_ptr: ?*anyopaque) callconv(.c) void {
     const raw = archive_ptr orelse return;
@@ -88,6 +89,12 @@ fn getFile(self: c.VALUE) *File {
     return @ptrCast(@alignCast(c.rb_check_typeddata(self, &file_type)));
 }
 
+/// The live zip_t behind a LibZip::File, or null once closed. Streams resolve
+/// the archive through this instead of caching a pointer that closing releases.
+pub fn archiveOf(self: c.VALUE) ?*c.zip_t {
+    return getFile(self).archive;
+}
+
 fn openFile(argc: c_int, argv: [*c]c.VALUE, klass: c.VALUE) callconv(.c) c.VALUE {
     _ = klass;
     if (argc < 1 or argc > 2) c.rb_error_arity(argc, 1, 2);
@@ -109,6 +116,11 @@ fn openFile(argc: c_int, argv: [*c]c.VALUE, klass: c.VALUE) callconv(.c) c.VALUE
         if (c.RTEST(create_val)) flags |= c.ZIP_CREATE;
     }
 
+    // Everything that can raise happens before zip_open: between the open and
+    // the wrap, no owner of the zip_t would release it.
+    var password = if (opts == c.Qnil) c.Qnil else c.rb_hash_lookup2(opts, c.ID2SYM(c.rb_intern("password")), c.Qnil);
+    const password_ptr = if (password == c.Qnil) null else c.rb_string_value_cstr(&password);
+
     var zip_exit_code: c_int = 0;
     const maybe_archive = c.zip_open(path, flags, &zip_exit_code);
 
@@ -116,14 +128,9 @@ fn openFile(argc: c_int, argv: [*c]c.VALUE, klass: c.VALUE) callconv(.c) c.VALUE
         errors.raiseCode(zip_exit_code);
     }
 
-    const password_value = if (opts == c.Qnil) c.Qnil else c.rb_hash_lookup2(opts, c.ID2SYM(c.rb_intern("password")), c.Qnil);
-
     const archive = maybe_archive.?;
-    if (password_value != c.Qnil) {
-        var password = password_value;
-        _ = c.rb_string_value(&password);
-
-        if (c.zip_set_default_password(archive, c.rb_string_value_cstr(&password)) < 0) {
+    if (password_ptr) |ptr| {
+        if (c.zip_set_default_password(archive, ptr) < 0) {
             const error_code = c.zip_error_code_zip(c.zip_get_error(archive));
             _ = c.zip_discard(archive);
             errors.raiseCode(error_code);
@@ -200,6 +207,10 @@ fn addFile(argc: c_int, argv: [*c]c.VALUE, self: c.VALUE) callconv(.c) c.VALUE {
     const src = c.rb_string_value_cstr(&src_v);
 
     const src_path = std.mem.span(src);
+    // Stack-local, not a global: rb_ext_ractor_safe(true) lets these methods
+    // run in parallel Ractors.
+    var io_threaded: std.Io.Threaded = .init_single_threaded;
+    const io = io_threaded.io();
     const stat = std.Io.Dir.cwd().statFile(io, src_path, .{}) catch |err| {
         const kind: errors.ErrorKind = switch (err) {
             error.FileNotFound => .not_found,
@@ -216,27 +227,24 @@ fn addFile(argc: c_int, argv: [*c]c.VALUE, self: c.VALUE) callconv(.c) c.VALUE {
         c.rb_raise(errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .invalid_argument))], "%s is not a regular file", src);
     }
 
+    // A failed add is a per-entry error, as it's in libzip: release what this
+    // call allocated and keep the archive usable.
     const zip_src = c.zip_source_file(archive, src, 0, -1);
     if (zip_src == null) {
-        const zip_error = c.zip_get_error(archive);
-        const zip_exit_code = c.zip_error_code_zip(zip_error);
-        _ = c.zip_discard(archive);
-        file.archive = null;
-        errors.raiseCode(zip_exit_code);
+        errors.raiseCode(c.zip_error_code_zip(c.zip_get_error(archive)));
     }
 
     const index = c.zip_file_add(archive, name, zip_src, c.ZIP_FL_OVERWRITE);
     if (index < 0) {
-        const zip_error = c.zip_get_error(archive);
-        const zip_exit_code = c.zip_error_code_zip(zip_error);
+        const zip_exit_code = c.zip_error_code_zip(c.zip_get_error(archive));
         c.zip_source_free(zip_src);
-        file.archive = null;
         errors.raiseCode(zip_exit_code);
     }
+    const entry_index = cast.entryIndex(index);
 
-    if (encryption_config.method != .none and c.zip_file_set_encryption(archive, @intCast(index), encryption.methodVal(&encryption_config), encryption.passwordPtr(&encryption_config)) < 0) {
+    if (encryption_config.method != .none and c.zip_file_set_encryption(archive, entry_index, encryption.methodVal(&encryption_config), encryption.passwordPtr(&encryption_config)) < 0) {
         const zip_exit_code = c.zip_error_code_zip(c.zip_get_error(archive));
-        _ = c.zip_delete(archive, @intCast(index));
+        _ = c.zip_delete(archive, entry_index);
         errors.raiseCode(zip_exit_code);
     }
 
@@ -259,9 +267,13 @@ fn readFile(argc: c_int, argv: [*c]c.VALUE, self: c.VALUE) callconv(.c) c.VALUE 
     const name = c.rb_string_value_cstr(&name_rb);
 
     var stat: c.zip_stat_t = undefined;
+    c.zip_stat_init(&stat);
     if (c.zip_stat(archive, name, 0, &stat) < 0) {
         errors.raiseCode(c.zip_error_code_zip(c.zip_get_error(archive)));
     }
+    // Without this, a size the archive left out looks the same as an empty
+    // entry.
+    const size_known = (stat.valid & c.ZIP_STAT_SIZE) != 0;
 
     const maybe_file =
         if (encryption_config.password_rb == c.Qnil)
@@ -274,26 +286,37 @@ fn readFile(argc: c_int, argv: [*c]c.VALUE, self: c.VALUE) callconv(.c) c.VALUE 
                 encryption.passwordPtr(&encryption_config),
             );
 
-    if (maybe_file == null) {
+    const zip_file = maybe_file orelse {
         errors.raiseCode(
             c.zip_error_code_zip(c.zip_get_error(archive)),
         );
+    };
+
+    // Reserve up to the limit, then grow as the data actually shows up.
+    const reserve: c_long = if (size_known)
+        @min(cast.rubyLength(stat.size), READ_PREALLOC_CAP)
+    else
+        0;
+    const result = c.rb_str_buf_new(reserve);
+
+    var buffer: [READ_BUFFER_SIZE]u8 = undefined;
+    var total: c.zip_uint64_t = 0;
+    while (true) {
+        const amount = c.zip_fread(zip_file, &buffer, READ_BUFFER_SIZE);
+        if (amount < 0) {
+            const error_code = c.zip_error_code_zip(c.zip_file_get_error(zip_file));
+            _ = c.zip_fclose(zip_file);
+            errors.raiseCode(error_code);
+        }
+        if (amount == 0) break;
+        _ = c.rb_str_cat(result, &buffer, amount);
+        total += cast.readAmount(amount);
     }
-
-    const zip_file = maybe_file;
-
-    const result = c.rb_str_new(null, @intCast(stat.size));
-    const read_exit_code = c.zip_fread(zip_file, c.RSTRING_PTR(result), stat.size);
-    var trailing: [1]u8 = undefined;
-    const verify_exit_code = c.zip_fread(zip_file, @ptrCast(&trailing), 1);
-    const error_code = c.zip_error_code_zip(c.zip_file_get_error(zip_file));
     _ = c.zip_fclose(zip_file);
-    if (read_exit_code < 0 or @as(u64, @intCast(read_exit_code)) != stat.size) {
-        errors.raiseCode(error_code);
-    }
 
-    if (verify_exit_code != 0) {
-        errors.raiseCode(if (verify_exit_code < 0) error_code else c.ZIP_ER_INCONS);
+    // Detects an entry shorter or longer than it claims.
+    if (size_known and total != stat.size) {
+        errors.raiseCode(c.ZIP_ER_INCONS);
     }
 
     return result;
@@ -321,12 +344,20 @@ fn getInputStream(argc: c_int, argv: [*c]c.VALUE, self: c.VALUE) callconv(.c) c.
         errors.raiseCode(c.zip_error_code_zip(c.zip_get_error(archive)));
     }
 
-    return input_stream.create(archive, self, &file.input_streams, name, stat.size, &encryption_config);
+    return input_stream.create(
+        archive,
+        self,
+        &file.input_streams,
+        name,
+        stat.size,
+        (stat.valid & c.ZIP_STAT_SIZE) != 0,
+        &encryption_config,
+    );
 }
 
 fn getOutputStream(argc: c_int, argv: [*c]c.VALUE, self: c.VALUE) callconv(.c) c.VALUE {
     const file = getFile(self);
-    const archive = file.archive orelse {
+    _ = file.archive orelse {
         c.rb_raise(errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .entry))], "archive already closed");
     };
 
@@ -338,7 +369,7 @@ fn getOutputStream(argc: c_int, argv: [*c]c.VALUE, self: c.VALUE) callconv(.c) c
     var name_v = argv[0];
     _ = c.rb_string_value_cstr(&name_v);
 
-    return output_stream.create(archive, self, name_v, &encryption_config);
+    return output_stream.create(self, name_v, &encryption_config);
 }
 
 fn statEntry(self: c.VALUE, file: *File, index: c.zip_uint64_t) c.VALUE {
@@ -357,10 +388,11 @@ fn entries(self: c.VALUE) callconv(.c) c.VALUE {
 
     const num_entries = c.zip_get_num_entries(archive, 0);
     if (num_entries < 0) errors.raiseCode(c.zip_error_code_zip(c.zip_get_error(archive)));
+    const count = cast.entryCount(num_entries);
 
-    const ary = c.rb_ary_new_capa(@intCast(num_entries));
+    const ary = c.rb_ary_new_capa(cast.rubyLength(count));
     var i: c.zip_uint64_t = 0;
-    while (i < @as(c.zip_uint64_t, @intCast(num_entries))) : (i += 1) {
+    while (i < count) : (i += 1) {
         const obj = statEntry(self, file, i);
         if (obj != c.Qnil) _ = c.rb_ary_push(ary, obj);
     }
@@ -392,13 +424,14 @@ fn countEntries(self: c.VALUE) callconv(.c) c.VALUE {
     };
     const num_entries = c.zip_get_num_entries(archive, 0);
     if (num_entries < 0) errors.raiseCode(c.zip_error_code_zip(c.zip_get_error(archive)));
+    const count = cast.entryCount(num_entries);
 
     var active_entries: c.zip_uint64_t = 0;
     var i: c.zip_uint64_t = 0;
-    while (i < @as(c.zip_uint64_t, @intCast(num_entries))) : (i += 1) {
+    while (i < count) : (i += 1) {
         if (c.zip_get_name(archive, i, 0) != null) active_entries += 1;
     }
-    return c.ULL2NUM(@intCast(active_entries));
+    return c.ULL2NUM(active_entries);
 }
 
 fn findEntry(self: c.VALUE, name_val: c.VALUE) callconv(.c) c.VALUE {
@@ -410,7 +443,7 @@ fn findEntry(self: c.VALUE, name_val: c.VALUE) callconv(.c) c.VALUE {
     const name = c.rb_string_value_cstr(&name_v);
     const index = c.zip_name_locate(archive, name, 0);
     if (index < 0) return c.Qnil;
-    return statEntry(self, file, @intCast(index));
+    return statEntry(self, file, cast.entryIndex(index));
 }
 
 fn getEntryByName(self: c.VALUE, name_val: c.VALUE) callconv(.c) c.VALUE {
@@ -472,10 +505,11 @@ fn names(self: c.VALUE) callconv(.c) c.VALUE {
     };
     const num_entries = c.zip_get_num_entries(archive, 0);
     if (num_entries < 0) errors.raiseCode(c.zip_error_code_zip(c.zip_get_error(archive)));
+    const count = cast.entryCount(num_entries);
 
-    const ary = c.rb_ary_new_capa(@intCast(num_entries));
+    const ary = c.rb_ary_new_capa(cast.rubyLength(count));
     var i: c.zip_uint64_t = 0;
-    while (i < @as(c.zip_uint64_t, @intCast(num_entries))) : (i += 1) {
+    while (i < count) : (i += 1) {
         const name: [*:0]const u8 = c.zip_get_name(archive, i, 0) orelse continue;
         _ = c.rb_ary_push(ary, c.rb_utf8_str_new_cstr(name));
     }
@@ -510,7 +544,7 @@ fn removeFile(self: c.VALUE, name_or_entry: c.VALUE) callconv(.c) c.VALUE {
         c.rb_raise(errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .not_found))], "entry not found: %s", name);
     }
 
-    const snapshot = statEntry(self, file, @intCast(index));
+    const snapshot = statEntry(self, file, cast.entryIndex(index));
     if (snapshot == c.Qnil) {
         c.rb_raise(
             errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .not_found))],
@@ -519,7 +553,7 @@ fn removeFile(self: c.VALUE, name_or_entry: c.VALUE) callconv(.c) c.VALUE {
         );
     }
 
-    if (c.zip_delete(archive, @intCast(index)) < 0) {
+    if (c.zip_delete(archive, cast.entryIndex(index)) < 0) {
         errors.raiseCode(c.zip_error_code_zip(c.zip_get_error(archive)));
     }
 
@@ -561,11 +595,11 @@ fn renameFile(self: c.VALUE, name_or_entry: c.VALUE, new_name_val: c.VALUE) call
         );
     }
 
-    if (c.zip_file_rename(archive, @intCast(index), new_name, 0) < 0) {
+    if (c.zip_file_rename(archive, cast.entryIndex(index), new_name, 0) < 0) {
         errors.raiseCode(c.zip_error_code_zip(c.zip_get_error(archive)));
     }
 
-    const snapshot = statEntry(self, file, @intCast(index));
+    const snapshot = statEntry(self, file, cast.entryIndex(index));
     if (snapshot == c.Qnil) {
         c.rb_raise(
             errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .not_found))],
@@ -591,9 +625,9 @@ fn getComment(self: c.VALUE) callconv(.c) c.VALUE {
         errors.raiseCode(c.zip_error_code_zip(c.zip_get_error(archive)));
     }
 
-    if (length == 0) return c.Qnil;
+    if (length <= 0) return c.Qnil;
 
-    const result = c.rb_str_new(ptr, @intCast(length));
+    const result = c.rb_str_new(ptr, length);
     const utf8 = c.rb_enc_find_index("UTF-8");
     const binary = c.rb_enc_find_index("ASCII-8BIT");
 
@@ -625,18 +659,12 @@ fn setComment(self: c.VALUE, value: c.VALUE) callconv(.c) c.VALUE {
     var comment = value;
     _ = c.rb_string_value(&comment);
 
-    const length: u32 = @intCast(c.RSTRING_LEN(comment));
-    if (length > MAX_COMMENT_LENGTH) {
-        c.rb_raise(
-            errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .invalid_argument))],
-            "comment is too long: maximum is %i bytes",
-            MAX_COMMENT_LENGTH,
-        );
-    }
-
+    // Bounded before truncating: truncating first lets a length with legal-
+    // looking low bits through.
+    const length = cast.commentLength(c.RSTRING_LEN(comment));
     const ptr = c.RSTRING_PTR(comment);
 
-    if (c.zip_set_archive_comment(archive, ptr, @intCast(length)) < 0) {
+    if (c.zip_set_archive_comment(archive, ptr, length) < 0) {
         errors.raiseCode(c.zip_error_code_zip(c.zip_get_error(archive)));
     }
 
@@ -676,17 +704,8 @@ fn setEntryComment(
     if (comment_val != c.Qnil) {
         _ = c.rb_string_value(&comment_v);
 
-        const length: u32 = @intCast(c.RSTRING_LEN(comment_v));
-        if (length > MAX_COMMENT_LENGTH) {
-            c.rb_raise(
-                errors.error_class_registry[@backingInt(@as(errors.ErrorKind, .invalid_argument))],
-                "comment is too long: maximum is %i bytes",
-                MAX_COMMENT_LENGTH,
-            );
-        }
-
+        comment_len = cast.commentLength(c.RSTRING_LEN(comment_v));
         comment_ptr = c.RSTRING_PTR(comment_v);
-        comment_len = @intCast(length);
 
         const encoding = c.rb_enc_get_index(comment_v);
         const utf8 = c.rb_enc_find_index("UTF-8");
@@ -697,7 +716,7 @@ fn setEntryComment(
         }
     }
 
-    if (c.zip_file_set_comment(archive, @intCast(index), comment_ptr, comment_len, flags) < 0) {
+    if (c.zip_file_set_comment(archive, cast.entryIndex(index), comment_ptr, comment_len, flags) < 0) {
         errors.raiseCode(c.zip_error_code_zip(c.zip_get_error(archive)));
     }
 

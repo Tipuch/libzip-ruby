@@ -5,10 +5,10 @@ require "zlib"
 
 # `remove` marks the entry deleted; the change is written by `close` (libzip's
 # convention — there is no #discard). The return value is a snapshot taken
-# *before* the deletion, so its metadata stays readable after the archive is
-# closed. A name that is not present raises LibZip::NotFoundError.
+# *before* the deletion, so the metadata remains readable after the archive
+# is closed. A missing name gives LibZip::NotFoundError.
 #
-# The archive is always built with LibZip::File itself, except where the test is
+# The archive is always built with LibZip::File, except where the test is
 # specifically about a foreign tool's archive (ENTRIES_ZIP, defined in helper.rb).
 
 class RemoveTest < Minitest::Test
@@ -22,8 +22,8 @@ class RemoveTest < Minitest::Test
 
   def teardown = FileUtils.remove_entry(@dir)
 
-  # a.txt, b.txt, keep.txt — always leave a survivor so closing never empties
-  # the archive (see test_removing_the_last_entry_leaves_no_file).
+  # a.txt, b.txt, keep.txt — always keep one entry so closing won't empty
+  # the archive (see `test_removing_the_last_entry_leaves_no_file`).
   def build_archive
     LibZip::File.open(@zip_path, create: true) do |zip|
       zip.add("a.txt", @src)
@@ -85,10 +85,10 @@ class RemoveTest < Minitest::Test
     LibZip::File.open(@zip_path) do |zip|
       zip.remove("a.txt")
 
-      # A deleted entry must disappear from *every* listing, not just the ones
+      # A deleted entry must disappear from *each* listing, not just the ones
       # that go through zip_stat_index. libzip keeps the slot around until
       # close and reports zip_get_name(index, 0) == NULL for it, which is why
-      # names/size have to filter on that instead of trusting the raw count.
+      # names/size have to filter on that instead of relying on the raw count.
       assert_equal ["b.txt", "keep.txt"], zip.names
       assert_equal 2, zip.size
       assert_equal 2, zip.length
@@ -101,8 +101,8 @@ class RemoveTest < Minitest::Test
       removed = zip.remove("a.txt")
 
       assert_raises(LibZip::NotFoundError) { zip.remove("a.txt") }
-      # the snapshot we handed back is stale by definition: its name no longer
-      # resolves, so passing it back raises too
+      # the snapshot we passed back is stale by definition: the name no longer
+      # resolves, so passing it back gives LibZip::NotFoundError too
       assert_raises(LibZip::NotFoundError) { zip.remove(removed) }
     end
   end
@@ -142,7 +142,7 @@ class RemoveTest < Minitest::Test
         zip.remove(other.find_entry("a.txt"))
       end
 
-      # and our same-named entry is still there
+      # and the new entry with the same name is still there
       assert_equal ["a.txt", "b.txt", "keep.txt"], zip.names
 
       other.close
@@ -170,7 +170,7 @@ class RemoveTest < Minitest::Test
       zip.remove("a.txt")
       zip.add("a.txt", @src)
 
-      # libzip appends the new entry rather than reusing the freed slot, so the
+      # libzip appends the new entry instead of reusing the freed slot, so the
       # live entry count is unchanged: 3 entries were there, one was removed,
       # one re-added.
       assert_equal 3, zip.entries.length
@@ -191,7 +191,7 @@ class RemoveTest < Minitest::Test
       assert_equal "docs/", removed.name
       assert removed.directory?
 
-      # the directory entry is gone, the file inside it is not
+      # the directory entry is deleted, the file inside it isn't
       assert_equal ["b.txt", "app.rb", "café.txt", "docs/a.txt"], zip.names
       assert_equal "inside\n", zip.read("docs/a.txt")
     end
@@ -200,7 +200,7 @@ class RemoveTest < Minitest::Test
   end
 
   def test_removing_the_last_entry_leaves_no_file
-    # Same libzip rule as plan 01: zip_close.c refuses to write an archive with
+    # Same libzip rule as plan 01: zip_close.c won't write an archive with
     # no entries, so closing removes the file instead of writing a 22-byte EOCD.
     solo = File.join(@dir, "solo.zip")
     LibZip::File.open(solo, create: true) { |zip| zip.add("only.txt", @src) }
@@ -219,8 +219,8 @@ class RemoveTest < Minitest::Test
   end
 
   def test_close_writes_a_smaller_central_directory
-    # Every other assertion here reads the archive back through our own
-    # binding, which would happily agree with a bug. This one reads the bytes on
+    # Each other assertion here checks the archive back through our binding,
+    # which would cheerfully agree with a bug. This one looks at the bytes on
     # disk: a zip ends with an End Of Central Directory record, "PK\x05\x06"
     # followed by the entry count as a little-endian u16 at offset 10.
     LibZip::File.open(@zip_path) { |zip| zip.remove("a.txt") }
