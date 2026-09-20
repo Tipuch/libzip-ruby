@@ -9,7 +9,7 @@
 #   1. no unchecked truncating casts on archive data outside src/cast.zig
 #   2. the suite passes at Debug and ReleaseSafe, where Zig *would* catch a cast
 #      we missed, and at ReleaseFast, which is what users actually run
-#   3. valgrind finds no definite leaks and no invalid accesses
+#   3. valgrind finds no definite leaks in the extension itself
 #
 # Usage: script/check [--no-valgrind]
 set -euo pipefail
@@ -57,22 +57,40 @@ if [[ $run_valgrind -eq 1 ]]; then
         # interpreter, plus "possibly lost" noise. The signal we want is the
         # leak summary,
         # not the exit code.
+        #
+        # --num-callers is raised from its default of 12 so our own frame stays
+        # on the stack for a leak that surfaces deep inside libzip.
         log=$(mktemp)
+        xml=$(mktemp)
+        trap 'rm -f "$log" "$xml"' EXIT
         RUBY_FREE_AT_EXIT=1 valgrind \
             --leak-check=full \
             --show-leak-kinds=definite \
-            --errors-for-leak-kinds=definite \
+            --num-callers=30 \
+            --xml=yes --xml-file="$xml" \
             ruby -Izig-out/lib -Itest \
             -e "Dir.glob('test/**/*_test.rb').each { |f| require File.expand_path(f) }" \
             2>&1 | tee "$log"
 
         grep -q "0 failures, 0 errors" "$log" || fail "suite failed under valgrind"
-        if ! grep -q "definitely lost: 0 bytes in 0 blocks" "$log"; then
-            grep -B2 -A12 "definitely lost" "$log" >&2 || true
-            fail "valgrind found definitely-lost blocks"
-        fi
-        echo "no definitely-lost blocks"
-        rm -f "$log"
+
+        # The interpreter leaks a handful of blocks of its own at startup (the
+        # argv copy in ruby_init_setproctitle, autoload table entries), and
+        # which ones differ per Ruby version. Ours are the records with a frame
+        # in libzip_ruby.so.
+        ruby - "$xml" <<'RB' || fail "valgrind found definitely-lost blocks in the extension"
+records = File.read(ARGV[0]).split("<error>")
+              .select { |e| e["<kind>Leak_DefinitelyLost</kind>"] }
+ours = records.select { |e| e["libzip_ruby.so"] }
+ours.each do |e|
+  bytes = e[%r{<leakedbytes>(\d+)</leakedbytes>}, 1]
+  frames = e.scan(%r{<fn>(.+?)</fn>}).flatten.first(8)
+  warn "#{bytes} bytes definitely lost:\n  #{frames.join("\n  ")}\n  ..."
+end
+warn "#{records.size} definitely-lost record(s), #{ours.size} from the extension"
+exit ours.empty?
+RB
+        echo "no definitely-lost blocks in the extension"
     fi
 fi
 
