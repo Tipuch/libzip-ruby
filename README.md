@@ -349,12 +349,14 @@ libzip takes care of the cryptography. AES-128, AES-192 and AES-256 are supporte
 Traditional ZipCrypto is supported for reading, and reading only.
 
 **Writing.** Pass `encryption:` (and optionally `password:`) to `add` or
-`get_output_stream`:
+`get_output_stream`. An entry written without its own `password:` falls back
+to the archive default:
 
 ```ruby
-LibZip::File.open("secrets.zip", create: true) do |zip|
-  zip.add("notes.txt", "notes.txt", encryption: :aes256, password: "hunter2")
+LibZip::File.open("secrets.zip", create: true, password: "hunter2") do |zip|
+  zip.add("notes.txt", "notes.txt", encryption: :aes256, password: "s3kr1t")
 
+  # no password: of its own, so this entry gets the archive default
   zip.get_output_stream("todo.txt", encryption: :aes128) do |out|
     out.write("buy milk")
   end
